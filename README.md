@@ -96,3 +96,7 @@ npm start       # 生产模式启动 server.ts，同时提供 API 与前端页�
 ├── index.html / vite.config.ts
 └── render.yaml             # Render 部署配置
 ```
+
+## 许可证
+
+本项目采用 [MIT](LICENSE) 开源许可证。
