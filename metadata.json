@@ -1,0 +1,8 @@
+{
+  "name": "型材优化销料管理系统",
+  "description": "专业的线材、管材下料优化软件，支持多种型号、颜色管理，提供最优切割方案，减少材料浪费。",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

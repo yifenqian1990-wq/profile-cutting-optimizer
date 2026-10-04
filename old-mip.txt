@@ -1,0 +1,223 @@
+async function optimizeCuttingMIP(
+  demands: DemandItem[],
+  stocks: StockItem[],
+  fixedPlans: Record<string, FixedLengthPlan>,
+  settings: Settings,
+  onProgress?: ProgressCallback
+): Promise<OptimizationSummary> {
+  const glpk = await getGLPK();
+  const { kerf, trim: globalTrim } = settings;
+  const summaries: ModelColorSummary[] = [];
+  const unfulfilled: DemandItem[] = [];
+
+  const groups = new Map<string, { d: DemandItem[]; s: StockItem[]; f: FixedLengthPlan | null }>();
+  demands.forEach((d) => {
+    const key = `${d.model}|${d.color}`;
+    if (!groups.has(key)) groups.set(key, { d: [], s: [], f: fixedPlans[d.model] || null });
+    groups.get(key)!.d.push({ ...d });
+  });
+  if (settings.prioritizeStock) {
+    stocks.forEach((s) => {
+      const key = `${s.model}|${s.color}`;
+      if (groups.has(key)) groups.get(key)!.s.push({ ...s });
+    });
+  }
+
+  const groupKeys = Array.from(groups.keys());
+  for (let gIdx = 0; gIdx < groupKeys.length; gIdx++) {
+    const key = groupKeys[gIdx];
+    const group = groups.get(key)!;
+    
+    // Yield to the event loop
+    await new Promise(resolve => setTimeout(resolve, 0));
+    
+    // Report progress
+    if (onProgress) {
+      const currentProgress = 10 + Math.round((gIdx / groupKeys.length) * 80);
+      onProgress(currentProgress);
+    }
+
+    const [model, color] = key.split("|");
+    const itemTrim = group.f?.trim ?? globalTrim;
+    const demandMap = new Map<number, { qty: number; id: string; remarks: string }>();
+    group.d.forEach(d => {
+      const existing = demandMap.get(d.length);
+      if (existing) existing.qty += d.quantity;
+      else demandMap.set(d.length, { qty: d.quantity, id: d.id, remarks: d.remarks });
+    });
+    const uniqueDemands = Array.from(demandMap.entries()).map(([len, data]) => ({ length: len, ...data }));
+    
+    const binTypes: { length: number; quantity: number; isFixed: boolean; id: string; cost: number; name: string }[] = [];
+    group.s.forEach(s => {
+      const cost = settings.prioritizeStock ? 0.001 : s.length * 1000;
+      binTypes.push({ length: s.length, quantity: s.quantity, isFixed: false, id: s.id, cost, name: `库存(${s.length}mm)` });
+    });
+    let fixedLengths = (group.f?.lengths || []).filter(len => len > 0);
+    if (fixedLengths.length === 0 && group.s.length === 0) {
+      if (settings.limitLengthEnabled && settings.minLength && settings.maxLength) {
+        const mod = settings.modulusEnabled ? (settings.modulusValue || 100) : 100;
+        for (let l = settings.minLength; l <= settings.maxLength; l += mod) {
+          fixedLengths.push(l);
+        }
+      } else {
+        fixedLengths = [6000];
+      }
+    }
+    fixedLengths.forEach(len => {
+      binTypes.push({ length: len, quantity: 999, isFixed: true, id: `fixed-${len}`, cost: len, name: `定尺规格(${len}mm)` });
+    });
+
+    const totalPieces = uniqueDemands.reduce((sum, d) => sum + d.qty, 0);
+    const totalDemandLen = uniqueDemands.reduce((sum, d) => sum + d.length * d.qty, 0);
+    const minBinLen = Math.min(...binTypes.map(b => b.length));
+    
+    // N must be large enough to accommodate the pieces even if using the smallest bins
+    // We add a 20% buffer for waste and +10 for safety
+    const N = Math.min(totalPieces, Math.ceil((totalDemandLen * 1.2) / minBinLen) + 10);
+
+    const lp: any = {
+      name: `WireOpt_${model}_${color}`,
+      objective: { direction: glpk.GLP_MIN, name: 'total_length', vars: [] },
+      subjectTo: [], generals: [], binaries: []
+    };
+
+    for (let j = 0; j < N; j++) {
+      for (let k = 0; k < binTypes.length; k++) {
+        const varName = `B_${j}_${k}`;
+        lp.objective.vars.push({ name: varName, coef: binTypes[k].cost });
+        lp.binaries.push(varName);
+      }
+      for (let i = 0; i < uniqueDemands.length; i++) {
+        lp.generals.push(`x_${j}_${i}`);
+      }
+    }
+
+    uniqueDemands.forEach((d, i) => {
+      const vars = [];
+      for (let j = 0; j < N; j++) vars.push({ name: `x_${j}_${i}`, coef: 1 });
+      lp.subjectTo.push({ name: `demand_${i}`, vars, bnds: { type: glpk.GLP_LO, lb: d.qty, ub: 0 } });
+    });
+
+    for (let j = 0; j < N; j++) {
+      const vars = [];
+      for (let k = 0; k < binTypes.length; k++) vars.push({ name: `B_${j}_${k}`, coef: 1 });
+      lp.subjectTo.push({ name: `spec_limit_bin_${j}`, vars, bnds: { type: glpk.GLP_UP, lb: 0, ub: 1 } });
+    }
+
+    for (let j = 0; j < N; j++) {
+      const vars = [];
+      for (let i = 0; i < uniqueDemands.length; i++) vars.push({ name: `x_${j}_${i}`, coef: uniqueDemands[i].length + kerf });
+      for (let k = 0; k < binTypes.length; k++) vars.push({ name: `B_${j}_${k}`, coef: -(binTypes[k].length - itemTrim * 2 + kerf) });
+      lp.subjectTo.push({ name: `capacity_bin_${j}`, vars, bnds: { type: glpk.GLP_UP, lb: 0, ub: 0 } });
+    }
+
+    binTypes.forEach((bin, k) => {
+      if (!bin.isFixed) {
+        const vars = [];
+        for (let j = 0; j < N; j++) vars.push({ name: `B_${j}_${k}`, coef: 1 });
+        lp.subjectTo.push({ name: `stock_limit_${k}`, vars, bnds: { type: glpk.GLP_UP, lb: 0, ub: bin.quantity } });
+      }
+    });
+
+    for (let j = 0; j < N - 1; j++) {
+      const vars = [];
+      for (let k = 0; k < binTypes.length; k++) { 
+        vars.push({ name: `B_${j}_${k}`, coef: 1 }); 
+        vars.push({ name: `B_${j+1}_${k}`, coef: -1 }); 
+      }
+      lp.subjectTo.push({ name: `symmetry_order_${j}`, vars, bnds: { type: glpk.GLP_LO, lb: 0, ub: 0 } });
+    }
+
+    const result = await glpk.solve(lp, { 
+      msglev: glpk.GLP_MSG_OFF, 
+      presol: true, 
+      tmlim: 1500 // Faster time limit per model/color group
+    });
+
+    if (result.result.status === glpk.GLP_OPT || result.result.status === glpk.GLP_FEAS) {
+      const groupPatterns: CuttingPattern[] = [];
+      const binResults = new Map<number, { binIdx: number; typeIdx: number; cuts: { demandIdx: number; count: number }[] }>();
+
+      Object.entries(result.result.vars).forEach(([varName, val]) => {
+        const value = Math.round(val as any);
+        if (value > 0) {
+          if (varName.startsWith('B_')) {
+            const [, j, k] = varName.split('_').map(Number);
+            if (!binResults.has(j)) binResults.set(j, { binIdx: j, typeIdx: k, cuts: [] });
+            else binResults.get(j)!.typeIdx = k;
+          } else if (varName.startsWith('x_')) {
+            const [, j, i] = varName.split('_').map(Number);
+            if (!binResults.has(j)) binResults.set(j, { binIdx: j, typeIdx: -1, cuts: [] });
+            binResults.get(j)!.cuts.push({ demandIdx: i, count: value });
+          }
+        }
+      });
+
+      binResults.forEach((res) => {
+        if (res.typeIdx === -1 || res.cuts.length === 0) return;
+        const bin = binTypes[res.typeIdx];
+        const totalCut = res.cuts.reduce((sum, c) => sum + uniqueDemands[c.demandIdx].length * c.count, 0);
+        const numCuts = res.cuts.reduce((sum, c) => sum + c.count, 0);
+        const waste = bin.length - totalCut - (itemTrim * 2) - (numCuts > 1 ? (numCuts - 1) * kerf : 0);
+        const patternCuts = res.cuts.map(c => ({ length: uniqueDemands[c.demandIdx].length, count: c.count, demandId: uniqueDemands[c.demandIdx].id, remarks: uniqueDemands[c.demandIdx].remarks }));
+        patternCuts.sort((a, b) => b.length - a.length);
+        const patternKey = `${bin.length}|${bin.isFixed}|${patternCuts.map(c => `${c.length}x${c.count}`).join(';')}`;
+        const existing = groupPatterns.find(p => { const pKey = `${p.originalLength}|${p.isFixed}|${p.cuts.map(c => `${c.length}x${c.count}`).join(';')}`; return pKey === patternKey; });
+        if (existing) existing.count++;
+        else groupPatterns.push({ count: 1, originalLength: bin.length, cuts: patternCuts, waste: Math.max(0, waste), efficiency: (totalCut / bin.length) * 100, isFixed: bin.isFixed });
+      });
+
+      // Group patterns by originalLength AND isFixed
+      const patternsByGroup = new Map<string, CuttingPattern[]>();
+      groupPatterns.forEach(p => {
+        const gKey = `${p.originalLength}|${p.isFixed}`;
+        const existing = patternsByGroup.get(gKey) || [];
+        existing.push(p);
+        patternsByGroup.set(gKey, existing);
+      });
+
+      const demandCounts = new Map<number, number>();
+      group.d.forEach(d => demandCounts.set(d.length, (demandCounts.get(d.length) || 0) + d.quantity));
+      const demandSummary = Array.from(demandCounts.entries()).sort((a, b) => b[0] - a[0]).map(([len, qty]) => `${len}x${qty}`).join(' ; ');
+
+      patternsByGroup.forEach((groupPatternsForLen, gKey) => {
+        const [lenStr, isFixedStr] = gKey.split('|');
+        const len = parseFloat(lenStr);
+        const isFixed = isFixedStr === 'true';
+
+        const totalQuantity = groupPatternsForLen.reduce((sum, p) => sum + p.count, 0);
+        const totalWasteInGroup = groupPatternsForLen.reduce((sum, p) => sum + p.waste * p.count, 0);
+        const totalOriginalInGroup = groupPatternsForLen.reduce((sum, p) => sum + p.originalLength * p.count, 0);
+        const totalCutInGroup = groupPatternsForLen.reduce((sum, p) => sum + p.cuts.reduce((s, c) => s + c.length * c.count, 0) * p.count, 0);
+
+        summaries.push({ 
+          model, 
+          color, 
+          totalQuantity, 
+          originalLength: (len / 1000).toFixed(2) + (isFixed ? ' (定尺)' : ' (库存)'), 
+          totalWaste: totalWasteInGroup, 
+          efficiency: (totalCutInGroup / totalOriginalInGroup) * 100, 
+          patterns: groupPatternsForLen, 
+          demandSummary 
+        });
+      });
+    } else {
+      const fallback = await optimizeCuttingFFD(group.d, group.s, group.f ? { [model]: group.f } : {}, settings);
+      summaries.push(...fallback.summaries);
+      unfulfilled.push(...fallback.unfulfilled);
+    }
+  }
+
+  // Sort summaries by Model -> Color -> Length (Descending)
+  summaries.sort((a, b) => {
+    if (a.model !== b.model) return a.model.localeCompare(b.model);
+    if (a.color !== b.color) return a.color.localeCompare(b.color);
+    return parseFloat(b.originalLength as string) - parseFloat(a.originalLength as string);
+  });
+
+  const totalStockUsed = summaries.reduce((sum, s) => sum + s.patterns.reduce((pSum, p) => pSum + p.originalLength * p.count, 0), 0);
+  const totalDemandFulfilled = summaries.reduce((sum, s) => sum + s.patterns.reduce((pSum, p) => pSum + p.cuts.reduce((cSum, c) => cSum + c.length * c.count, 0) * p.count, 0), 0);
+  const totalWaste = summaries.reduce((sum, s) => sum + s.totalWaste, 0);
+  const averageEfficiency = totalStockUsed > 0 ? (totalDemandFulfilled / totalStockUsed) * 100 : 0;
+  return { totalStockUsed, totalDemandFulfilled, totalWaste, averageEfficiency, summaries, unfulfilled };
+}
