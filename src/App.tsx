@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useCallback } from 'react';
 import { get, set } from 'idb-keyval';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -250,21 +250,50 @@ export default function App() {
   const [aiMessages, setAiMessages] = useState<ChatMessage[]>([]);
   const [aiLatestSuggestion, setAiLatestSuggestion] = useState<AISuggestion | null>(null);
 
-  // Snapshot functionality to check if data is saved / unchanged
-  const currentEngineeringSnapshot = useMemo(() => JSON.stringify({ purchases, profileSales, profileSalesColumns, savedPlans, printInfo: settings.printInfo }), [purchases, profileSales, profileSalesColumns, savedPlans, settings.printInfo]);
-  const currentOptimizationSnapshot = useMemo(() => JSON.stringify({ demands, stocks, fixedPlans, settings, results }), [demands, stocks, fixedPlans, settings, results]);
+  // Lightweight revision tracking instead of expensive JSON.stringify
+  const [engRev, setEngRev] = useState(0);
+  const [savedEngRev, setSavedEngRev] = useState(0);
+  const [optRev, setOptRev] = useState(0);
+  const [savedOptRev, setSavedOptRev] = useState(0);
 
-  const [savedEngineeringSnapshot, setSavedEngineeringSnapshot] = useState<string>(currentEngineeringSnapshot);
-  const [savedOptimizationSnapshot, setSavedOptimizationSnapshot] = useState<string>(currentOptimizationSnapshot);
+  const isEngDirty = engRev !== savedEngRev;
+  const isOptDirty = optRev !== savedOptRev;
+
+  // Track engineering changes
+  const prevEngDeps = useRef({ purchases, profileSales, profileSalesColumns, savedPlans, printInfo: settings.printInfo });
+  React.useEffect(() => {
+    if (
+      prevEngDeps.current.purchases !== purchases ||
+      prevEngDeps.current.profileSales !== profileSales ||
+      prevEngDeps.current.profileSalesColumns !== profileSalesColumns ||
+      prevEngDeps.current.savedPlans !== savedPlans ||
+      prevEngDeps.current.printInfo !== settings.printInfo
+    ) {
+      prevEngDeps.current = { purchases, profileSales, profileSalesColumns, savedPlans, printInfo: settings.printInfo };
+      setEngRev(r => r + 1);
+    }
+  }, [purchases, profileSales, profileSalesColumns, savedPlans, settings.printInfo]);
+
+  // Track optimization changes
+  const prevOptDeps = useRef({ demands, stocks, fixedPlans, settings, results });
+  React.useEffect(() => {
+    if (
+      prevOptDeps.current.demands !== demands ||
+      prevOptDeps.current.stocks !== stocks ||
+      prevOptDeps.current.fixedPlans !== fixedPlans ||
+      prevOptDeps.current.settings !== settings ||
+      prevOptDeps.current.results !== results
+    ) {
+      prevOptDeps.current = { demands, stocks, fixedPlans, settings, results };
+      setOptRev(r => r + 1);
+    }
+  }, [demands, stocks, fixedPlans, settings, results]);
 
   React.useEffect(() => {
     if (settingsLoaded) {
-      setSavedOptimizationSnapshot(JSON.stringify({ demands, stocks, fixedPlans, settings, results }));
+      setSavedOptRev(optRev);
     }
   }, [settingsLoaded]);
-
-  const engDirty = currentEngineeringSnapshot !== savedEngineeringSnapshot;
-  const optDirty = currentOptimizationSnapshot !== savedOptimizationSnapshot;
 
   // Derive unique models from demands
   const uniqueModels = useMemo(() => {
@@ -380,7 +409,7 @@ export default function App() {
     }
   };
 
-  const handleClearPlans = () => {
+  const handleClearPlans = useCallback(() => {
     if (confirm("确定要定尺方案恢复初始状态吗？")) {
       const defaultPlans: Record<string, FixedLengthPlan> = {};
       uniqueModels.forEach(model => {
@@ -389,7 +418,7 @@ export default function App() {
       setFixedPlans(defaultPlans);
       toast.success("所有定尺方案已恢复为初始默认状态");
     }
-  };
+  }, [uniqueModels]);
 
   const handleApplyAISuggestionsV2 = (
     newFixedPlans: Record<string, FixedLengthPlan> | null, 
@@ -468,7 +497,7 @@ export default function App() {
     toast.success("方案已导出");
   };
 
-  const updateFixedPlan = (model: string, plan: FixedLengthPlan) => {
+  const updateFixedPlan = useCallback((model: string, plan: FixedLengthPlan) => {
     // Ensure at least one length is 6000 if it's a new plan
     const updatedPlan = {
       ...plan,
@@ -478,19 +507,25 @@ export default function App() {
       ...prev,
       [model]: updatedPlan
     }));
-  };
+  }, []);
 
-  const handleToggleAllLock = (lock: boolean) => {
-    const updatedPlans = { ...fixedPlans };
-    uniqueModels.forEach(model => {
-      if (!updatedPlans[model]) {
-        updatedPlans[model] = { model, lengths: [6000, 0, 0, 0, 0, 0] };
-      }
-      updatedPlans[model] = { ...updatedPlans[model], isPinned: lock };
+  const handleToggleAllLock = useCallback((lock: boolean) => {
+    setFixedPlans(prev => {
+      const updatedPlans = { ...prev };
+      uniqueModels.forEach(model => {
+        if (!updatedPlans[model]) {
+          updatedPlans[model] = { model, lengths: [6000, 0, 0, 0, 0, 0] };
+        }
+        updatedPlans[model] = { ...updatedPlans[model], isPinned: lock };
+      });
+      return updatedPlans;
     });
-    setFixedPlans(updatedPlans);
     toast.success(lock ? "所有定尺方案已锁定" : "所有定尺方案已解锁");
-  };
+  }, [uniqueModels]);
+
+  const handleClearPendingSales = useCallback(() => {
+    setPendingSalePlanIds([]);
+  }, []);
 
   const handleSaveToPlanManager = () => {
     if (!results) return;
@@ -684,10 +719,10 @@ export default function App() {
       saveToHistory(filename, projectData, mainMode === 'engineering' ? filename.replace(/\.[^/.]+$/, "") : currentOptimizationName);
       if (mainMode === 'engineering') {
         setCurrentProjectName(filename.replace(/\.[^/.]+$/, ""));
-        setSavedEngineeringSnapshot(currentEngineeringSnapshot);
+        setSavedEngRev(engRev);
       } else {
         setCurrentOptimizationName(filename.replace(/\.[^/.]+$/, ""));
-        setSavedOptimizationSnapshot(currentOptimizationSnapshot);
+        setSavedOptRev(optRev);
       }
       toast.success(mainMode === 'engineering' ? "工程数据已保存导出！" : "数据已保存导出！");
       return true;
@@ -731,11 +766,11 @@ export default function App() {
         if (mainMode === 'engineering') {
           setCurrentProjectName(handle.name.replace(/\.[^/.]+$/, ""));
           setCurrentProjectHandle(handle);
-          setSavedEngineeringSnapshot(currentEngineeringSnapshot);
+          setSavedEngRev(engRev);
         } else {
           setCurrentOptimizationName(handle.name.replace(/\.[^/.]+$/, ""));
           setCurrentOptimizationHandle(handle);
-          setSavedOptimizationSnapshot(currentOptimizationSnapshot);
+          setSavedOptRev(optRev);
         }
         toast.success(mainMode === 'engineering' ? "工程数据已保存导出！" : "数据已保存导出！");
         result = true;
@@ -787,14 +822,8 @@ export default function App() {
        if (data.savedPlans) setSavedPlans(data.savedPlans);
        if (data.printInfo) setSettings(prev => ({ ...prev, printInfo: data.printInfo }));
        
-       const newSnapshot = JSON.stringify({
-          purchases: data.purchases || purchases,
-          profileSales: data.profileSales || profileSales,
-          profileSalesColumns: data.profileSalesColumns || profileSalesColumns,
-          savedPlans: data.savedPlans || savedPlans,
-          printInfo: data.printInfo || settings.printInfo
-       });
-       setSavedEngineeringSnapshot(newSnapshot);
+       setEngRev(0);
+       setSavedEngRev(0);
        toast.success("工程数据导入成功！");
     } else {
        if (data.demands) setDemands(data.demands);
@@ -806,14 +835,8 @@ export default function App() {
        }
        if (data.results !== undefined) setResults(data.results);
        
-       const newSnapshot = JSON.stringify({
-          demands: data.demands || demands,
-          stocks: data.stocks || stocks,
-          fixedPlans: data.fixedPlans || fixedPlans,
-          settings: newSettings,
-          results: data.results !== undefined ? data.results : results
-       });
-       setSavedOptimizationSnapshot(newSnapshot);
+       setOptRev(0);
+       setSavedOptRev(0);
        toast.success("套裁数据导入成功！");
     }
   };
@@ -866,13 +889,15 @@ export default function App() {
       setSavedPlans([]);
       setCurrentProjectName("");
       setCurrentProjectHandle(null);
-      setSavedEngineeringSnapshot(JSON.stringify({ purchases: [], profileSales: [], profileSalesColumns: [], savedPlans: [], printInfo: settings.printInfo }));
+      setEngRev(0);
+      setSavedEngRev(0);
     } else {
       setDemands([]);
       setStocks([]);
       setFixedPlans({});
       setResults(null);
-      setSavedOptimizationSnapshot(JSON.stringify({ demands: [], stocks: [], fixedPlans: {}, settings, results: null }));
+      setOptRev(0);
+      setSavedOptRev(0);
       setCurrentOptimizationName("");
       setCurrentOptimizationHandle(null);
     }
@@ -972,7 +997,7 @@ export default function App() {
     }
   };
 
-  const handleDeletePlan = (planId: string, revokeRelated: boolean) => {
+  const handleDeletePlan = useCallback((planId: string, revokeRelated: boolean) => {
     const plan = savedPlans.find(p => p.id === planId);
     if (!plan) return;
     
@@ -996,9 +1021,9 @@ export default function App() {
     }
     
     setSavedPlans(prev => prev.filter(p => p.id !== planId));
-  };
+  }, [savedPlans, profileSalesColumns]);
 
-  const handleRenamePlan = (planId: string, newName: string) => {
+  const handleRenamePlan = useCallback((planId: string, newName: string) => {
     const plan = savedPlans.find(p => p.id === planId);
     if (!plan) return;
     const oldName = plan.name;
@@ -1021,21 +1046,21 @@ export default function App() {
       }
       return changed ? updated : pur;
     }));
-  };
+  }, [savedPlans]);
 
-  const handleSaleFromPlan = (planId: string) => {
+  const handleSaleFromPlan = useCallback((planId: string) => {
     setPendingSalePlanIds([planId]);
     setMainMode('engineering');
     setActiveTab("sales");
-  };
+  }, []);
 
-  const handleBatchSaleFromPlans = (planIds: string[]) => {
+  const handleBatchSaleFromPlans = useCallback((planIds: string[]) => {
     setPendingSalePlanIds(planIds);
     setMainMode('engineering');
     setActiveTab("sales");
-  };
+  }, []);
 
-  const handleUtilizeOffcuts = (planId: string) => {
+  const handleUtilizeOffcuts = useCallback((planId: string) => {
     const plan = savedPlans.find(p => p.id === planId);
     if (!plan) return;
     const offcuts: PurchaseItem[] = [];
@@ -1083,7 +1108,7 @@ export default function App() {
     
     setPurchases(prev => [...prev, ...offcuts]);
     toast.success(`成功导入 ${offcuts.length} 条可利用料头数据到采购单管理`);
-  };
+  }, [savedPlans, settings.usableOffcutLength, purchases, profileSales]);
 
   return (
     <div className="min-h-screen bg-[#F5F5F4] text-[#1A1A1A] font-sans selection:bg-orange-100 selection:text-orange-900">
@@ -1214,7 +1239,7 @@ export default function App() {
                 {currentProjectName && (
                   <span className="relative ml-3 mr-2 text-sm font-normal text-black/60 bg-black/5 px-2 py-1 rounded align-middle flex items-center gap-1">
                     <FolderOpen className="h-3 w-3" />{currentProjectName}
-                    {currentEngineeringSnapshot === savedEngineeringSnapshot && (
+                    {!isEngDirty && (
                       <Check className="h-4 w-4 text-green-500 absolute -bottom-1.5 -right-1.5 bg-[#F5F5F4] rounded-full p-[1px] shadow-sm" strokeWidth={4} />
                     )}
                   </span>
@@ -1222,7 +1247,7 @@ export default function App() {
                 {currentOptimizationName && (
                   <span className="relative ml-1 text-sm font-normal text-orange-700 bg-orange-100 px-2 py-1 rounded align-middle flex items-center gap-1">
                     <FileText className="h-3 w-3" />{currentOptimizationName}
-                    {currentOptimizationSnapshot === savedOptimizationSnapshot && (
+                    {!isOptDirty && (
                       <Check className="h-4 w-4 text-green-500 absolute -bottom-1.5 -right-1.5 bg-[#F5F5F4] rounded-full p-[1px] shadow-sm" strokeWidth={4} />
                     )}
                   </span>
@@ -1411,15 +1436,15 @@ export default function App() {
           </div>
 
           <div className="print-flatten">
-            <TabsContent value="project-settings" keepMounted className="mt-0">
+            <TabsContent value="project-settings" className="mt-0">
               <ProjectSettings settings={settings} setSettings={setSettings} purchases={purchases} />
             </TabsContent>
 
-            <TabsContent value="purchase" keepMounted className="mt-0">
+            <TabsContent value="purchase" className="mt-0">
               <PurchaseManagement data={purchases} setData={setPurchases} />
             </TabsContent>
 
-            <TabsContent value="sales" keepMounted className="mt-0">
+            <TabsContent value="sales" className="mt-0">
               <ProfileSalesTable 
                 data={profileSales} 
                 setData={setProfileSales} 
@@ -1429,13 +1454,13 @@ export default function App() {
                 setColumns={setProfileSalesColumns} 
                 savedPlans={savedPlans}
                 pendingSalePlanIds={pendingSalePlanIds}
-                onClearPendingSales={() => setPendingSalePlanIds([])}
+                onClearPendingSales={handleClearPendingSales}
                 settings={settings}
                 setSettings={setSettings}
               />
             </TabsContent>
 
-            <TabsContent value="plan-management" keepMounted className="mt-0">
+            <TabsContent value="plan-management" className="mt-0">
               <PlanManagement 
                 savedPlans={savedPlans} 
                 setSavedPlans={setSavedPlans} 
@@ -1452,11 +1477,11 @@ export default function App() {
               />
             </TabsContent>
 
-            <TabsContent value="demand" keepMounted className="mt-0">
+            <TabsContent value="demand" className="mt-0">
               <DemandTable data={demands} setData={setDemands} purchases={purchases} />
             </TabsContent>
 
-            <TabsContent value="fixed" keepMounted className="mt-0">
+            <TabsContent value="fixed" className="mt-0">
               <FixedLengthTable 
                 models={uniqueModels} 
                 plans={fixedPlans} 
@@ -1469,15 +1494,15 @@ export default function App() {
               />
             </TabsContent>
 
-            <TabsContent value="stock" keepMounted className="mt-0">
+            <TabsContent value="stock" className="mt-0">
               <StockTable data={stocks} setData={setStocks} salesData={profileSales} purchases={purchases} settings={settings} />
             </TabsContent>
 
-            <TabsContent value="settings" keepMounted className="mt-0">
+            <TabsContent value="settings" className="mt-0">
               <SettingsPanel settings={settings} setSettings={setSettings} purchases={purchases} />
             </TabsContent>
 
-            <TabsContent value="results" keepMounted className="mt-0">
+            <TabsContent value="results" className="mt-0">
               <ResultsView 
                 summary={results} 
                 settings={settings} 
@@ -1489,34 +1514,36 @@ export default function App() {
               />
             </TabsContent>
 
-            <TabsContent value="ai-report" keepMounted className="mt-0">
-              <AIAdvisor 
-                demands={demands} 
-                stocks={stocks} 
-                profileSales={profileSales}
-                profileSalesColumns={profileSalesColumns}
-                purchases={purchases}
-                summary={results} 
-                isOptimizing={isOptimizing}
-                messages={aiMessages}
-                setMessages={setAiMessages}
-                latestSuggestion={aiLatestSuggestion}
-                setLatestSuggestion={setAiLatestSuggestion}
-                aiSettings={{
-                  ...settings.ai, 
-                  modulusEnabled: settings.modulusEnabled, 
-                  modulusValue: settings.modulusValue || 100 
-                }}
-                currentSettings={{
-                  kerf: settings.kerf,
-                  trim: settings.trim,
-                  algorithm: settings.algorithm as 'FFD' | 'CG',
-                  prioritizeStock: settings.prioritizeStock
-                }}
-                fixedPlans={fixedPlans}
-                onApplySuggestions={handleApplyAISuggestionsV2}
-              />
-            </TabsContent>
+            {settings.ai?.enabled && (
+              <TabsContent value="ai-report" className="mt-0">
+                <AIAdvisor 
+                  demands={demands} 
+                  stocks={stocks} 
+                  profileSales={profileSales}
+                  profileSalesColumns={profileSalesColumns}
+                  purchases={purchases}
+                  summary={results} 
+                  isOptimizing={isOptimizing}
+                  messages={aiMessages}
+                  setMessages={setAiMessages}
+                  latestSuggestion={aiLatestSuggestion}
+                  setLatestSuggestion={setAiLatestSuggestion}
+                  aiSettings={{
+                    ...settings.ai, 
+                    modulusEnabled: settings.modulusEnabled, 
+                    modulusValue: settings.modulusValue || 100 
+                  }}
+                  currentSettings={{
+                    kerf: settings.kerf,
+                    trim: settings.trim,
+                    algorithm: settings.algorithm as 'FFD' | 'CG',
+                    prioritizeStock: settings.prioritizeStock
+                  }}
+                  fixedPlans={fixedPlans}
+                  onApplySuggestions={handleApplyAISuggestionsV2}
+                />
+              </TabsContent>
+            )}
           </div>
         </Tabs>
       </main>
