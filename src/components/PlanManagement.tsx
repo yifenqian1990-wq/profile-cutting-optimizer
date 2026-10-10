@@ -24,7 +24,7 @@ interface PlanManagementProps {
   isActive?: boolean;
 }
 
-export function PlanManagement({ savedPlans, setSavedPlans, columns, salesData, purchases = [], onSaleFromPlan, onBatchSaleFromPlans, onUtilizeOffcuts, onDeletePlan, onRenamePlan, settings, isActive }: PlanManagementProps) {
+export const PlanManagement = React.memo(function PlanManagement({ savedPlans, setSavedPlans, columns, salesData, purchases = [], onSaleFromPlan, onBatchSaleFromPlans, onUtilizeOffcuts, onDeletePlan, onRenamePlan, settings, isActive }: PlanManagementProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [sortBy, setSortBy] = useTableState<'name' | 'time' | 'status'>('plan_management_sort', 'time');
 
@@ -474,4 +474,4 @@ export function PlanManagement({ savedPlans, setSavedPlans, columns, salesData, 
       </Card>
     </div>
   );
-}
+});

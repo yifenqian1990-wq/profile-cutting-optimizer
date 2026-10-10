@@ -1,5 +1,6 @@
 
 import React, { useState, useMemo, useRef, useCallback } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { 
   Table, 
   TableBody, 
@@ -225,7 +226,7 @@ const DemandRow = React.memo(function DemandRow({
   return true;
 });
 
-export function DemandTable({ data, setData, purchases }: DemandTableProps) {
+export const DemandTable = React.memo(function DemandTable({ data, setData, purchases }: DemandTableProps) {
   const [sortConfig, setSortConfig] = useTableState<SortConfig>('demand_sort', null);
   const [filters, setFilters] = useTableState<Partial<Record<keyof DemandItem, string>>>('demand_filters', {});
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -244,6 +245,12 @@ export function DemandTable({ data, setData, purchases }: DemandTableProps) {
     remarks: 150,  
     actions: 60
   });
+
+  const totalCalculatedWidth = useMemo(() => {
+    return Object.values(columnWidths).reduce((a, b) => a + b, 0);
+  }, [columnWidths]);
+
+  const parentRef = useRef<HTMLDivElement>(null);
 
   const handleExportExcel = () => {
     if (data.length === 0) {
@@ -348,27 +355,48 @@ export function DemandTable({ data, setData, purchases }: DemandTableProps) {
     return result;
   }, [data, sortConfig, filters]);
 
+  const rowVirtualizer = useVirtualizer({
+    count: processedData.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 41,
+    overscan: 10,
+  });
+
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const totalVirtualSize = rowVirtualizer.getTotalSize();
+  const paddingTop = virtualRows.length > 0 ? virtualRows[0]?.start || 0 : 0;
+  const paddingBottom = virtualRows.length > 0 ? totalVirtualSize - (virtualRows[virtualRows.length - 1]?.end || 0) : 0;
+
   // Selection handlers
-  const handleRowClick = (id: string, event: React.MouseEvent) => {
-    const newSelected = new Set(selectedIds);
-    
-    if (event.ctrlKey || event.metaKey) {
-      if (newSelected.has(id)) newSelected.delete(id);
-      else newSelected.add(id);
-      setLastClickedId(id);
-    } else if (event.shiftKey && lastClickedId) {
-      const idx1 = processedData.findIndex(item => item.id === lastClickedId);
-      const idx2 = processedData.findIndex(item => item.id === id);
-      const [start, end] = [Math.min(idx1, idx2), Math.max(idx1, idx2)];
-      processedData.slice(start, end + 1).forEach(item => newSelected.add(item.id));
-    } else {
-      newSelected.clear();
-      newSelected.add(id);
-      setLastClickedId(id);
-    }
-    
-    setSelectedIds(newSelected);
-  };
+  const processedDataRef = useRef(processedData);
+  processedDataRef.current = processedData;
+  const lastClickedIdRef = useRef(lastClickedId);
+  lastClickedIdRef.current = lastClickedId;
+  const isDraggingRef = useRef(isDragging);
+  isDraggingRef.current = isDragging;
+
+  const handleRowClick = useCallback((id: string, event: React.MouseEvent) => {
+    const currentLastId = lastClickedIdRef.current;
+    const currentProcessed = processedDataRef.current;
+
+    setSelectedIds(prev => {
+      const newSelected = new Set(prev);
+      if (event.ctrlKey || event.metaKey) {
+        if (newSelected.has(id)) newSelected.delete(id);
+        else newSelected.add(id);
+      } else if (event.shiftKey && currentLastId) {
+        const idx1 = currentProcessed.findIndex(item => item.id === currentLastId);
+        const idx2 = currentProcessed.findIndex(item => item.id === id);
+        const [start, end] = [Math.min(idx1, idx2), Math.max(idx1, idx2)];
+        currentProcessed.slice(start, end + 1).forEach(item => newSelected.add(item.id));
+      } else {
+        newSelected.clear();
+        newSelected.add(id);
+      }
+      return newSelected;
+    });
+    setLastClickedId(id);
+  }, []);
 
   const toggleSelectAll = () => {
     if (selectedIds.size === processedData.length && processedData.length > 0) {
@@ -378,25 +406,29 @@ export function DemandTable({ data, setData, purchases }: DemandTableProps) {
     }
   };
 
-  const handleMouseDown = (id: string, event: React.MouseEvent) => {
+  const handleMouseDown = useCallback((id: string, event: React.MouseEvent) => {
     if (event.button !== 0) return; // Only left click
     if (event.ctrlKey || event.shiftKey || event.metaKey) return;
     
     setIsDragging(true);
-    const newSelected = new Set([id]);
-    setSelectedIds(newSelected);
+    setSelectedIds(new Set([id]));
     setLastClickedId(id);
-  };
+  }, []);
 
-  const handleMouseEnter = (id: string) => {
-    if (!isDragging || !lastClickedId) return;
-    const newSelected = new Set(selectedIds);
-    const idx1 = processedData.findIndex(item => item.id === lastClickedId);
-    const idx2 = processedData.findIndex(item => item.id === id);
+  const handleMouseEnter = useCallback((id: string) => {
+    if (!isDraggingRef.current || !lastClickedIdRef.current) return;
+    const currentLastId = lastClickedIdRef.current;
+    const currentProcessed = processedDataRef.current;
+    const idx1 = currentProcessed.findIndex(item => item.id === currentLastId);
+    const idx2 = currentProcessed.findIndex(item => item.id === id);
     const [start, end] = [Math.min(idx1, idx2), Math.max(idx1, idx2)];
-    processedData.slice(start, end + 1).forEach(item => newSelected.add(item.id));
-    setSelectedIds(newSelected);
-  };
+
+    setSelectedIds(prev => {
+      const newSelected = new Set(prev);
+      currentProcessed.slice(start, end + 1).forEach(item => newSelected.add(item.id));
+      return newSelected;
+    });
+  }, []);
 
   const stopDragging = () => setIsDragging(false);
 
@@ -422,16 +454,30 @@ export function DemandTable({ data, setData, purchases }: DemandTableProps) {
     setData([...data, ...newItems]);
   };
 
-  const updateItem = (id: string, field: keyof DemandItem, value: any) => {
+  const updateItem = useCallback((id: string, field: keyof DemandItem, value: any) => {
     setData(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
-  };
+  }, [setData]);
+
+  const handleToggleSelect = useCallback((id: string, e?: React.MouseEvent) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setLastClickedId(id);
+  }, []);
+
+  const handleDeleteItem = useCallback((id: string) => {
+    setData(prev => prev.filter(i => i.id !== id));
+  }, [setData]);
 
   const HeaderCell = ({ label, columnKey, widthKey }: { label: string, columnKey: string, widthKey: string }) => {
     const [open, setOpen] = useState(false);
     const isActive = sortConfig?.key === columnKey || filters[columnKey as keyof DemandItem];
     
     return (
-      <TableHead style={{ width: columnWidths[widthKey] }} className="p-0 font-medium relative group/head">
+      <TableHead style={{ width: columnWidths[widthKey] }} className="p-0 font-medium relative group/head bg-stone-50">
         <Popover open={open} onOpenChange={setOpen}>
           <PopoverTrigger className={cn(
             "flex items-center justify-between w-full h-full px-3 py-2 hover:bg-black/5 transition-colors group outline-none cursor-pointer",
@@ -555,12 +601,15 @@ export function DemandTable({ data, setData, purchases }: DemandTableProps) {
           </Button>
         </div>
       </CardHeader>
-      <CardContent className="p-0 sm:p-6 sm:pt-0 overflow-x-auto">
-        <div className="rounded-md border border-black/5 min-w-full inline-block">
-          <Table className="select-none table-fixed">
-            <TableHeader className="bg-black/[0.03] border-b border-black/5">
-              <TableRow>
-                <TableHead style={{ width: columnWidths.selection }} className="px-3 relative group/head">
+      <CardContent className="p-0 sm:p-6 sm:pt-0">
+        <div 
+          ref={parentRef}
+          className="rounded-md border border-black/5 w-full overflow-auto max-h-[650px] custom-scrollbar print:overflow-visible print:max-h-none"
+        >
+          <table style={{ width: totalCalculatedWidth, minWidth: '100%' }} className="w-full caption-bottom text-sm select-none table-fixed">
+            <TableHeader className="bg-stone-50 border-b border-black/5 sticky top-0 z-20 shadow-sm">
+              <TableRow className="hover:bg-transparent">
+                <TableHead style={{ width: columnWidths.selection }} className="px-3 relative group/head bg-stone-50">
                   <div className="flex items-center justify-center cursor-pointer p-1 rounded hover:bg-black/5" onClick={toggleSelectAll}>
                     {selectedIds.size === processedData.length && processedData.length > 0 ? <CheckSquare className="h-4 w-4 text-orange-600" /> : <Square className="h-4 w-4 text-black/20" />}
                   </div>
@@ -575,7 +624,7 @@ export function DemandTable({ data, setData, purchases }: DemandTableProps) {
                 <HeaderCell label="数量" columnKey="quantity" widthKey="quantity" />
                 <HeaderCell label="颜色" columnKey="color" widthKey="color" />
                 <HeaderCell label="备注" columnKey="remarks" widthKey="remarks" />
-                <TableHead style={{ width: columnWidths.actions }} className="text-right pr-4 text-[10px] uppercase font-bold text-black/40 relative group/head">
+                <TableHead style={{ width: columnWidths.actions }} className="text-right pr-4 text-[10px] uppercase font-bold text-black/40 relative group/head bg-stone-50">
                   操作
                   <div 
                     className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-orange-400/50 transition-colors z-10"
@@ -587,40 +636,46 @@ export function DemandTable({ data, setData, purchases }: DemandTableProps) {
             <TableBody>
               {processedData.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="h-32 text-center text-black/30 italic">
+                  <TableCell colSpan={8} className="h-32 text-center text-black/30 italic">
                     {data.length === 0 ? "暂无下料清单" : "未找到匹配项"}
                   </TableCell>
                 </TableRow>
               ) : (
-                processedData.map((item, idx) => (
-                  <DemandRow
-                    key={item.id}
-                    item={item}
-                    idx={idx}
-                    isSelected={selectedIds.has(item.id)}
-                    columnWidths={columnWidths}
-                    onRowClick={handleRowClick}
-                    onMouseDown={handleMouseDown}
-                    onMouseEnter={handleMouseEnter}
-                    onToggleSelect={(id) => {
-                      const newSelected = new Set(selectedIds);
-                      if (newSelected.has(id)) {
-                        newSelected.delete(id);
-                      } else {
-                        newSelected.add(id);
-                      }
-                      setSelectedIds(newSelected);
-                      setLastClickedId(id);
-                    }}
-                    onUpdateItem={updateItem}
-                    onDeleteItem={(id) => setData(prev => prev.filter(i => i.id !== id))}
-                  />
-                ))
+                <>
+                  {paddingTop > 0 && (
+                    <TableRow style={{ height: `${paddingTop}px` }}>
+                      <TableCell colSpan={8} style={{ height: `${paddingTop}px`, padding: 0, border: 0 }} />
+                    </TableRow>
+                  )}
+                  {virtualRows.map((virtualRow) => {
+                    const item = processedData[virtualRow.index];
+                    return (
+                      <DemandRow
+                        key={item.id}
+                        item={item}
+                        idx={virtualRow.index}
+                        isSelected={selectedIds.has(item.id)}
+                        columnWidths={columnWidths}
+                        onRowClick={handleRowClick}
+                        onMouseDown={handleMouseDown}
+                        onMouseEnter={handleMouseEnter}
+                        onToggleSelect={handleToggleSelect}
+                        onUpdateItem={updateItem}
+                        onDeleteItem={handleDeleteItem}
+                      />
+                    );
+                  })}
+                  {paddingBottom > 0 && (
+                    <TableRow style={{ height: `${paddingBottom}px` }}>
+                      <TableCell colSpan={8} style={{ height: `${paddingBottom}px`, padding: 0, border: 0 }} />
+                    </TableRow>
+                  )}
+                </>
               )}
             </TableBody>
-          </Table>
+          </table>
         </div>
       </CardContent>
     </Card>
   );
-}
+});
