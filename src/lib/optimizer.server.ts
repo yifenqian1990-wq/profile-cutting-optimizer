@@ -501,7 +501,8 @@ export async function optimizeCutting(
         candMin = Math.ceil(candMin);
       }
       
-      const candidateLengths: number[] = [];
+      let candidateLengths: number[] = [];
+      const itemTrim = originalPlan.trim ?? settings.trim;
 
       // 3. 优先采用采购单定尺（排除料头利用，并满足长度限制、模数要求）
       if (settings.usePurchaseOrderLengths && purchases.length > 0) {
@@ -514,7 +515,6 @@ export async function optimizeCutting(
       // 如果未启用采购单定尺或采购单中未找到满足条件的定尺，则生成候选定尺方案（满足模数和长度限制）
       if (candidateLengths.length === 0) {
         if (settings.autoAdjustMode === 'smallMaterial') {
-          const itemTrim = originalPlan.trim ?? settings.trim;
           const candSet = new Set<number>();
           for (const d of modelDemands) {
             for (let cutCount = 1; ; cutCount++) {
@@ -536,6 +536,22 @@ export async function optimizeCutting(
 
       if (candidateLengths.length === 0) {
         candidateLengths.push(originalPlan.lengths.find((v: number) => v > 0) || 6000);
+      } else if (candidateLengths.length > 16) {
+        // Forward heuristic pruning: prioritize candidates that best fit high-quantity demands
+        const scoredCands = candidateLengths.map(cand => {
+          let fitScore = 0;
+          for (const d of modelDemands) {
+            const effL = cand - itemTrim * 2;
+            const pieces = Math.floor(effL / (d.length + settings.kerf));
+            if (pieces > 0) {
+              const waste = effL - pieces * (d.length + settings.kerf);
+              fitScore += (1 - waste / cand) * d.quantity;
+            }
+          }
+          return { cand, fitScore };
+        });
+        scoredCands.sort((a, b) => b.fitScore - a.fitScore);
+        candidateLengths = scoredCands.slice(0, 16).map(x => x.cand);
       }
 
       const maxCounts = Math.min(Math.max(1, settings.maxAutoLengthsCount ?? 6), 6);
@@ -1412,72 +1428,141 @@ export async function optimizeCuttingMIP(
           }
         }
 
+        // Dynamic Programming Bounded Knapsack (BKP) Pricing Subproblem with One-Pass Sharing
+        const hasDecimals = uniqueDemands.some(d => d.length % 1 !== 0) || 
+          binTypes.some(b => b.length % 1 !== 0 || b.trim % 1 !== 0) || 
+          kerf % 1 !== 0;
+        const scale = hasDecimals ? 10 : 1;
+
+        let maxEffCap = 0;
+        const binEffCaps = new Int32Array(binTypes.length);
         for (let k = 0; k < binTypes.length; k++) {
-          const bin = binTypes[k];
-          if (k === DUMMY_BIN_IDX) continue;
-          const effCap = Math.round((bin.length - bin.trim * 2 + kerf) * 10);
-          
-          const items = uniqueDemands.map((d, i) => ({
-            i,
-            weight: Math.round((d.length + kerf) * 10),
-            value: pi[i]
-          })).filter(it => it.weight <= effCap);
+          if (k === DUMMY_BIN_IDX) {
+            binEffCaps[k] = 0;
+            continue;
+          }
+          const b = binTypes[k];
+          const cap = Math.max(0, Math.round((b.length - b.trim * 2 + kerf) * scale));
+          binEffCaps[k] = cap;
+          if (cap > maxEffCap) maxEffCap = cap;
+        }
 
-          items.sort((a, b) => b.value / b.weight - a.value / a.weight);
+        interface SplitItem {
+          origDemandIdx: number;
+          weight: number;
+          value: number;
+          count: number;
+        }
+        const splitItems: SplitItem[] = [];
 
-          let bestVal = -1;
-          let bestCounts = new Array(M).fill(0);
-          let nodeCount = 0;
-          const maxNodes = 5000;
+        for (let i = 0; i < M; i++) {
+          const valPerUnit = pi[i];
+          if (valPerUnit <= 1e-6) continue;
+          const itemWeight = Math.round((uniqueDemands[i].length + kerf) * scale);
+          if (itemWeight <= 0 || itemWeight > maxEffCap) continue;
 
-          const search = (itemIdx: number, currentWeight: number, currentVal: number, counts: number[]) => {
-            nodeCount++;
-            if (nodeCount > maxNodes) return;
-            if (itemIdx === items.length) {
-              if (currentVal > bestVal) { bestVal = currentVal; bestCounts = [...counts]; }
-              return;
-            }
-            const item = items[itemIdx];
-            let bound = currentVal;
-            let remainingW = effCap - currentWeight;
-            for (let j = itemIdx; j < items.length; j++) {
-              const it = items[j];
-              if (it.weight <= remainingW) {
-                const take = Math.floor(remainingW / it.weight);
-                bound += take * it.value;
-                remainingW -= take * it.weight;
+          // Upper bound: bounded by actual demand quantity and max possible fit in largest bin
+          const maxPossible = Math.min(uniqueDemands[i].qty, Math.floor(maxEffCap / itemWeight));
+          if (maxPossible <= 0) continue;
+
+          // Binary decomposition: 1, 2, 4, ..., remainder
+          let remaining = maxPossible;
+          let power = 1;
+          while (remaining > 0) {
+            const count = Math.min(power, remaining);
+            splitItems.push({
+              origDemandIdx: i,
+              weight: count * itemWeight,
+              value: count * valPerUnit,
+              count: count
+            });
+            remaining -= count;
+            power *= 2;
+          }
+        }
+
+        added = false;
+        if (splitItems.length > 0 && maxEffCap > 0) {
+          const dp = new Float64Array(maxEffCap + 1);
+          const stride = maxEffCap + 1;
+          const chosen = new Uint8Array(splitItems.length * stride);
+
+          for (let itemIdx = 0; itemIdx < splitItems.length; itemIdx++) {
+            const item = splitItems[itemIdx];
+            const w = item.weight;
+            const v = item.value;
+            const rowOffset = itemIdx * stride;
+
+            for (let c = maxEffCap; c >= w; c--) {
+              const valWith = dp[c - w] + v;
+              if (valWith > dp[c] + 1e-9) {
+                dp[c] = valWith;
+                chosen[rowOffset + c] = 1;
               }
-              if (remainingW > 0) {
-                bound += (remainingW / it.weight) * it.value;
-                remainingW = 0;
-                break;
-              }
             }
-            if (bound <= bestVal + 1e-6) return;
-
-            const maxCount = Math.floor((effCap - currentWeight) / item.weight);
-            for (let count = maxCount; count >= 0; count--) {
-              if (nodeCount > maxNodes) return;
-              if (count > 0) {
-                  const nextCounts = [...counts];
-                  nextCounts[item.i] = count;
-                  search(itemIdx + 1, currentWeight + count * item.weight, currentVal + count * item.value, nextCounts);
-              } else {
-                  search(itemIdx + 1, currentWeight, currentVal, counts);
-              }
-            }
-          };
-
-          if (items.length > 0) {
-             search(0, 0, 0, new Array(M).fill(0));
           }
 
-          const reducedCost = bin.cost - bestVal - mu[k];
-          if (reducedCost < -1e-4) {
-            const exists = patterns.some(p => p.binIdx === k && p.counts.every((c, idx) => c === bestCounts[idx]));
+          interface CandidatePattern {
+            binIdx: number;
+            reducedCost: number;
+            counts: number[];
+          }
+          const candidatePatterns: CandidatePattern[] = [];
+
+          for (let k = 0; k < binTypes.length; k++) {
+            if (k === DUMMY_BIN_IDX) continue;
+            const effCap = binEffCaps[k];
+            if (effCap <= 0) continue;
+
+            let bestVal = 0;
+            let bestC = 0;
+            for (let c = effCap; c >= 0; c--) {
+              if (dp[c] > bestVal) {
+                bestVal = dp[c];
+                bestC = c;
+              }
+            }
+
+            const bin = binTypes[k];
+            const reducedCost = bin.cost - bestVal - mu[k];
+
+            if (reducedCost < -1e-4) {
+              const counts = new Array(M).fill(0);
+              let currC = bestC;
+              for (let itemIdx = splitItems.length - 1; itemIdx >= 0; itemIdx--) {
+                if (currC <= 0) break;
+                if (chosen[itemIdx * stride + currC] === 1) {
+                  const it = splitItems[itemIdx];
+                  counts[it.origDemandIdx] += it.count;
+                  currC -= it.weight;
+                }
+              }
+
+              if (counts.some(c => c > 0)) {
+                candidatePatterns.push({
+                  binIdx: k,
+                  reducedCost,
+                  counts
+                });
+              }
+            }
+          }
+
+          candidatePatterns.sort((a, b) => a.reducedCost - b.reducedCost);
+
+          const maxColumnsPerIter = 5;
+          let addedThisIter = 0;
+
+          for (const cand of candidatePatterns) {
+            const exists = patterns.some(p => 
+              p.binIdx === cand.binIdx && 
+              p.counts.every((c, idx) => c === cand.counts[idx])
+            );
             if (!exists) {
-              patterns.push({ counts: bestCounts, binIdx: k });
+              patterns.push({ counts: cand.counts, binIdx: cand.binIdx });
               added = true;
+              addedThisIter++;
+              if (addedThisIter >= maxColumnsPerIter) break;
             }
           }
         }
@@ -1522,7 +1607,7 @@ export async function optimizeCuttingMIP(
             }
           }
 
-          const resInt = await glpk.solve(lpInt, { msglev: glpk.GLP_MSG_OFF, presol: true });
+          const resInt = await glpk.solve(lpInt, { msglev: glpk.GLP_MSG_OFF, presol: true, tmlim: 3000, mipgap: 0.005 });
           if (resInt && (resInt.result.status === glpk.GLP_OPT || resInt.result.status === glpk.GLP_FEAS)) {
             resUse = resInt;
             isIntegerSolution = true;
