@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { OptimizationSummary, ModelColorSummary, CuttingPattern, Settings, DemandItem, StockItem, ProfileSalesItem, OrderColumn, PurchaseItem } from "../lib/optimizer";
@@ -33,7 +33,7 @@ interface ResultsViewProps {
   isActive?: boolean;
 }
 
-export function ResultsView({ summary, settings, setSettings, isOptimizing, progress, salesData, columns, planName, hideReportConfigButton, purchases = [], isActive = true }: ResultsViewProps) {
+export const ResultsView = React.memo(function ResultsView({ summary, settings, setSettings, isOptimizing, progress, salesData, columns, planName, hideReportConfigButton, purchases = [], isActive = true }: ResultsViewProps) {
   const [showUnfulfilled, setShowUnfulfilled] = useState(false);
   const [editPrintInfoVisible, setEditPrintInfoVisible] = useState(false);
   const [localPrintInfo, setLocalPrintInfo] = useState({ orderNo: settings.printInfo?.orderNo || '' });
@@ -297,6 +297,169 @@ export function ResultsView({ summary, settings, setSettings, isOptimizing, prog
     document.body.removeChild(link);
   };
 
+  // Pre-calculate material groups and their chunks for pagination (must be before early returns to obey Rules of Hooks)
+  const { summaryPages, pagedMaterialGroups } = useMemo(() => {
+    if (!summary) return { summaryPages: [], pagedMaterialGroups: [] };
+
+    const CHUNK_SIZE = 25; // Safely fits standard detail page height
+
+    const fixedSummaries = summary.summaries.filter(s => s.isFixed);
+    const stockSummaries = summary.summaries.filter(s => !s.isFixed);
+    
+    type SummaryRow = { isHeader: boolean, type: 'fixed'|'stock', s?: any, index?: number, totalCount?: number };
+    const summaryRows: SummaryRow[] = [];
+    
+    if (fixedSummaries.length > 0) {
+      summaryRows.push({ isHeader: true, type: 'fixed', totalCount: fixedSummaries.reduce((sum, s) => sum + s.totalQuantity, 0) });
+      fixedSummaries.forEach((s, i) => summaryRows.push({ isHeader: false, type: 'fixed', s, index: i }));
+    }
+    
+    if (stockSummaries.length > 0) {
+      summaryRows.push({ isHeader: true, type: 'stock', totalCount: stockSummaries.reduce((sum, s) => sum + s.totalQuantity, 0) });
+      stockSummaries.forEach((s, i) => summaryRows.push({ isHeader: false, type: 'stock', s, index: i }));
+    }
+    
+    const pages: SummaryRow[][] = [];
+    const MAX_UNITS_PER_PAGE = 24; // Limit max printing lines per page to 24 to prevent overflow with headers
+    let currentChunk: SummaryRow[] = [];
+    let currentUnits = 0;
+
+    for (const row of summaryRows) {
+      let units = 1;
+      if (row.isHeader) {
+        units = 2.5; // Headers take up more vertical space (margin top/bottom)
+      } else if (row.s) {
+        const modelLen = row.s.model ? String(row.s.model).length : 0;
+        
+        const linesForModel = Math.ceil(modelLen / 13);
+        
+        const maxLines = Math.max(1, linesForModel);
+        units = 1 + (maxLines - 1) * 0.8;
+      }
+
+      if (currentUnits + units > MAX_UNITS_PER_PAGE && currentChunk.length > 0) {
+        pages.push(currentChunk);
+        currentChunk = [row];
+        currentUnits = units;
+      } else {
+        currentChunk.push(row);
+        currentUnits += units;
+      }
+    }
+    if (currentChunk.length > 0) {
+      pages.push(currentChunk);
+    }
+    if (pages.length === 0) pages.push([]); // Ensure at least 1 summary page
+
+    
+    const pagedGroups: Array<{
+      model: string;
+      color: string;
+      demandSummary: string;
+      patterns: any[];
+      isFirstChunk: boolean;
+      isLastOfGroup: boolean; // Flag for printing overall summary
+      groupSummary: {
+         details: string;
+         totalQuantity: number;
+         efficiency: number;
+         individualLines: Array<{
+           originalLength: string;
+           count: number;
+           efficiency: number;
+         }>;
+      };
+      startIndex: number;
+      unfulfilledWarning?: string;
+    }> = [];
+
+    const materialGroups = new Map<string, ModelColorSummary[]>();
+    summary.summaries.forEach(s => {
+      const mKey = `${s.model}|${s.color}`;
+      const existing = materialGroups.get(mKey) || [];
+      existing.push(s);
+      materialGroups.set(mKey, existing);
+    });
+
+    Array.from(materialGroups.entries()).forEach(([mKey, sList]) => {
+      const [model, color] = mKey.split('|');
+      const allPatterns = sList.flatMap(s => s.patterns);
+      const demandSummary = sList[0].demandSummary;
+      
+      // Aggregated stats for the whole model|color group
+      let totalOriginalLen = 0;
+      let totalCutLen = 0;
+      let totalQty = 0;
+      const usageParts: string[] = [];
+
+      sList.forEach(s => {
+        const lenVal = parseFloat(String(s.originalLength));
+        const subTotalOriginal = s.totalQuantity * lenVal;
+        totalOriginalLen += subTotalOriginal;
+        totalCutLen += (s.efficiency / 100) * subTotalOriginal;
+        totalQty += s.totalQuantity;
+        
+        const label = String(s.originalLength).replace(' (定尺)', '(定)').replace(' (库存)', '(库)');
+        usageParts.push(`${label}x${s.totalQuantity}支`);
+      });
+
+      const groupSummary = {
+        model,
+        details: usageParts.join(' ; '),
+        totalQuantity: totalQty,
+        efficiency: (totalCutLen / totalOriginalLen) * 100,
+        individualLines: sList.map(s => ({
+          model: s.model,
+          originalLength: String(s.originalLength),
+          count: s.totalQuantity,
+          efficiency: s.efficiency
+        }))
+      };
+
+      // Check for items that were too long to be cut for THIS specific material
+      const failedForThis = summary.unfulfilled.filter(u => u.model === model && u.color === color);
+      const warning = failedForThis.length > 0 
+        ? `！！！警告：有 ${failedForThis.length} 类零件因太长无法排料 (最大需求:${Math.max(...failedForThis.map(f => f.length))}mm)`
+        : undefined;
+
+      // Split patterns into chunks
+      let remainingPatterns = [...allPatterns];
+      let startIndex = 0;
+      while(remainingPatterns.length > 0 || startIndex === 0) { // Keep at least one chunk even if empty
+        const isFirstChunk = startIndex === 0;
+        let currentChunkSize = CHUNK_SIZE;
+        
+        if (isFirstChunk) {
+           const demandItems = demandSummary.split(';').filter(x => x.trim()).length;
+           const demandRows = Math.ceil(demandItems / 4);
+           currentChunkSize = Math.max(3, CHUNK_SIZE - Math.ceil(demandRows * 1.5));
+        }
+
+        const chunk = remainingPatterns.slice(0, currentChunkSize);
+        remainingPatterns = remainingPatterns.slice(currentChunkSize);
+        const isLast = remainingPatterns.length === 0;
+        
+        pagedGroups.push({
+          model,
+          color,
+          demandSummary,
+          patterns: chunk,
+          isFirstChunk,
+          isLastOfGroup: isLast,
+          groupSummary,
+          startIndex,
+          unfulfilledWarning: warning
+        });
+        startIndex += chunk.length;
+        if (remainingPatterns.length === 0) break;
+      }
+    });
+
+    return { summaryPages: pages, pagedMaterialGroups: pagedGroups };
+  }, [summary]);
+
+  const totalPages = summaryPages.length + pagedMaterialGroups.length + ((summary?.unfulfilled && summary.unfulfilled.length > 0) ? 1 : 0);
+
   if (isOptimizing) {
     return (
       <Card className="border-black/10 shadow-none bg-white">
@@ -328,164 +491,6 @@ export function ResultsView({ summary, settings, setSettings, isOptimizing, prog
       </Card>
     );
   }
-
-  // Pre-calculate material groups and their chunks for pagination
-  const CHUNK_SIZE = 25; // Safely fits standard detail page height
-  const SUMMARY_CHUNK_SIZE = 36; // Balanced for 2-line text items to prevent overflow
-
-  const fixedSummaries = summary.summaries.filter(s => s.isFixed);
-  const stockSummaries = summary.summaries.filter(s => !s.isFixed);
-  
-  type SummaryRow = { isHeader: boolean, type: 'fixed'|'stock', s?: any, index?: number, totalCount?: number };
-  const summaryRows: SummaryRow[] = [];
-  
-  if (fixedSummaries.length > 0) {
-    summaryRows.push({ isHeader: true, type: 'fixed', totalCount: fixedSummaries.reduce((sum, s) => sum + s.totalQuantity, 0) });
-    fixedSummaries.forEach((s, i) => summaryRows.push({ isHeader: false, type: 'fixed', s, index: i }));
-  }
-  
-  if (stockSummaries.length > 0) {
-    summaryRows.push({ isHeader: true, type: 'stock', totalCount: stockSummaries.reduce((sum, s) => sum + s.totalQuantity, 0) });
-    stockSummaries.forEach((s, i) => summaryRows.push({ isHeader: false, type: 'stock', s, index: i }));
-  }
-  
-  const summaryPages: SummaryRow[][] = [];
-  const MAX_UNITS_PER_PAGE = 24; // Limit max printing lines per page to 24 to prevent overflow with headers
-  let currentChunk: SummaryRow[] = [];
-  let currentUnits = 0;
-
-  for (const row of summaryRows) {
-    let units = 1;
-    if (row.isHeader) {
-      units = 2.5; // Headers take up more vertical space (margin top/bottom)
-    } else if (row.s) {
-      const modelLen = row.s.model ? String(row.s.model).length : 0;
-      
-      const linesForModel = Math.ceil(modelLen / 13);
-      
-      const maxLines = Math.max(1, linesForModel);
-      units = 1 + (maxLines - 1) * 0.8;
-    }
-
-    if (currentUnits + units > MAX_UNITS_PER_PAGE && currentChunk.length > 0) {
-      summaryPages.push(currentChunk);
-      currentChunk = [row];
-      currentUnits = units;
-    } else {
-      currentChunk.push(row);
-      currentUnits += units;
-    }
-  }
-  if (currentChunk.length > 0) {
-    summaryPages.push(currentChunk);
-  }
-  if (summaryPages.length === 0) summaryPages.push([]); // Ensure at least 1 summary page
-
-  
-  const pagedMaterialGroups: Array<{
-    model: string;
-    color: string;
-    demandSummary: string;
-    patterns: any[];
-    isFirstChunk: boolean;
-    isLastOfGroup: boolean; // Flag for printing overall summary
-    groupSummary: {
-       details: string;
-       totalQuantity: number;
-       efficiency: number;
-       individualLines: Array<{
-         originalLength: string;
-         count: number;
-         efficiency: number;
-       }>;
-    };
-    startIndex: number;
-    unfulfilledWarning?: string;
-  }> = [];
-
-  const materialGroups = new Map<string, ModelColorSummary[]>();
-  summary.summaries.forEach(s => {
-    const mKey = `${s.model}|${s.color}`;
-    const existing = materialGroups.get(mKey) || [];
-    existing.push(s);
-    materialGroups.set(mKey, existing);
-  });
-
-  Array.from(materialGroups.entries()).forEach(([mKey, sList]) => {
-    const [model, color] = mKey.split('|');
-    const allPatterns = sList.flatMap(s => s.patterns);
-    const demandSummary = sList[0].demandSummary;
-    
-    // Aggregated stats for the whole model|color group
-    let totalOriginalLen = 0;
-    let totalCutLen = 0;
-    let totalQty = 0;
-    const usageParts: string[] = [];
-
-    sList.forEach(s => {
-      const lenVal = parseFloat(String(s.originalLength));
-      const subTotalOriginal = s.totalQuantity * lenVal;
-      totalOriginalLen += subTotalOriginal;
-      totalCutLen += (s.efficiency / 100) * subTotalOriginal;
-      totalQty += s.totalQuantity;
-      
-      const label = String(s.originalLength).replace(' (定尺)', '(定)').replace(' (库存)', '(库)');
-      usageParts.push(`${label}x${s.totalQuantity}支`);
-    });
-
-    const groupSummary = {
-      model,
-      details: usageParts.join(' ; '),
-      totalQuantity: totalQty,
-      efficiency: (totalCutLen / totalOriginalLen) * 100,
-      individualLines: sList.map(s => ({
-        model: s.model,
-        originalLength: String(s.originalLength),
-        count: s.totalQuantity,
-        efficiency: s.efficiency
-      }))
-    };
-
-    // Check for items that were too long to be cut for THIS specific material
-    const failedForThis = summary.unfulfilled.filter(u => u.model === model && u.color === color);
-    const warning = failedForThis.length > 0 
-      ? `！！！警告：有 ${failedForThis.length} 类零件因太长无法排料 (最大需求:${Math.max(...failedForThis.map(f => f.length))}mm)`
-      : undefined;
-
-    // Split patterns into chunks
-    let remainingPatterns = [...allPatterns];
-    let startIndex = 0;
-    while(remainingPatterns.length > 0 || startIndex === 0) { // Keep at least one chunk even if empty
-      const isFirstChunk = startIndex === 0;
-      let currentChunkSize = CHUNK_SIZE;
-      
-      if (isFirstChunk) {
-         const demandItems = demandSummary.split(';').filter(x => x.trim()).length;
-         const demandRows = Math.ceil(demandItems / 4);
-         currentChunkSize = Math.max(3, CHUNK_SIZE - Math.ceil(demandRows * 1.5));
-      }
-
-      const chunk = remainingPatterns.slice(0, currentChunkSize);
-      remainingPatterns = remainingPatterns.slice(currentChunkSize);
-      const isLast = remainingPatterns.length === 0;
-      
-      pagedMaterialGroups.push({
-        model,
-        color,
-        demandSummary,
-        patterns: chunk,
-        isFirstChunk,
-        isLastOfGroup: isLast,
-        groupSummary,
-        startIndex,
-        unfulfilledWarning: warning
-      });
-      startIndex += chunk.length;
-      if (remainingPatterns.length === 0) break;
-    }
-  });
-
-  const totalPages = summaryPages.length + pagedMaterialGroups.length + (summary.unfulfilled.length > 0 ? 1 : 0);
 
   // Helper to render the common boxed frame for each page
   const PageFrame = ({ children, pageNum }: { children: React.ReactNode, pageNum: number }) => (
@@ -976,4 +981,4 @@ export function ResultsView({ summary, settings, setSettings, isOptimizing, prog
       {/* Global Print Footer removed */}
     </div>
   );
-}
+});

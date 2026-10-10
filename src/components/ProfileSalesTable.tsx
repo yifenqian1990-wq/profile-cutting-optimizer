@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { Button } from "@/components/ui/button";
 import { 
   Plus, 
@@ -44,7 +45,7 @@ type SortConfig = {
   direction: 'asc' | 'desc';
 } | null;
 
-export function ProfileSalesTable({ 
+export const ProfileSalesTable = React.memo(function ProfileSalesTable({ 
   data, 
   setData, 
   columns, 
@@ -219,27 +220,6 @@ export function ProfileSalesTable({
 
   const processedData = useMemo(() => {
     let result = [...data];
-    Object.entries(filters).forEach(([key, value]) => {
-      if (!value) return;
-      result = result.filter(item => {
-        if (key === 'remaining') {
-           const remainder = item.quantity - columns.reduce((s, col) => s + (item.orders?.[col.id] || 0), 0);
-           return String(remainder).includes(value);
-        }
-        if (key.startsWith('col_')) {
-           const colId = key.replace('col_', '');
-           return String(item.orders?.[colId] || 0).includes(value);
-        }
-        return String((item as any)[key]).toLowerCase().includes(value.toLowerCase());
-      });
-    });
-
-    // Apply "only show sold" filters
-    Object.entries(onlyShowSoldCols).forEach(([colId, active]) => {
-      if (active) {
-        result = result.filter(item => (item.orders?.[colId] || 0) > 0);
-      }
-    });
 
     if (!isBatch) {
       const aggregatedMap = new Map<string, ProfileSalesItem>();
@@ -262,22 +242,57 @@ export function ProfileSalesTable({
       result = Array.from(aggregatedMap.values());
     }
 
+    // Precalculate remaining and sold once per item to avoid O(N * C) inside O(N log N) sort
+    const enrichedList = result.map(item => {
+      let sold = 0;
+      if (item.orders) {
+        for (let i = 0; i < columns.length; i++) {
+          sold += item.orders[columns[i].id] || 0;
+        }
+      }
+      return {
+        ...item,
+        _remaining: item.quantity - sold,
+        _sold: sold
+      };
+    });
+
+    let filtered = enrichedList;
+
+    Object.entries(filters).forEach(([key, value]) => {
+      if (!value) return;
+      filtered = filtered.filter(item => {
+        if (key === 'remaining') {
+           return String(item._remaining).includes(value);
+        }
+        if (key.startsWith('col_')) {
+           const colId = key.replace('col_', '');
+           return String(item.orders?.[colId] || 0).includes(value);
+        }
+        return String((item as any)[key]).toLowerCase().includes(value.toLowerCase());
+      });
+    });
+
+    // Apply "only show sold" filters
+    Object.entries(onlyShowSoldCols).forEach(([colId, active]) => {
+      if (active) {
+        filtered = filtered.filter(item => (item.orders?.[colId] || 0) > 0);
+      }
+    });
+
     // Apply "only show shortage" filter
     if (onlyShowShortage) {
-      result = result.filter(item => {
-        const remainder = item.quantity - columns.reduce((s, col) => s + (item.orders?.[col.id] || 0), 0);
-        return remainder < 0;
-      });
+      filtered = filtered.filter(item => item._remaining < 0);
     }
 
     if (sortConfig) {
-      result.sort((a: any, b: any) => {
+      filtered.sort((a: any, b: any) => {
         let aVal = a[sortConfig.key];
         let bVal = b[sortConfig.key];
         
         if (sortConfig.key === 'remaining') {
-           aVal = a.quantity - columns.reduce((s, col) => s + (a.orders?.[col.id] || 0), 0);
-           bVal = b.quantity - columns.reduce((s, col) => s + (b.orders?.[col.id] || 0), 0);
+           aVal = a._remaining;
+           bVal = b._remaining;
         } else if (sortConfig.key.startsWith('col_')) {
            const colId = sortConfig.key.replace('col_', '');
            aVal = a.orders?.[colId] || 0;
@@ -289,8 +304,21 @@ export function ProfileSalesTable({
         return 0;
       });
     }
-    return result;
+    return filtered;
   }, [data, columns, filters, sortConfig, isBatch, onlyShowSoldCols, onlyShowShortage]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: processedData.length,
+    getScrollElement: () => bottomScrollRef.current,
+    estimateSize: () => 41,
+    overscan: 10,
+  });
+
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const totalVirtualSize = rowVirtualizer.getTotalSize();
+  const paddingTop = virtualRows.length > 0 ? virtualRows[0]?.start || 0 : 0;
+  const paddingBottom = virtualRows.length > 0 ? totalVirtualSize - (virtualRows[virtualRows.length - 1]?.end || 0) : 0;
+  const totalColSpan = 7 + (isBatch ? 1 : 0) + columns.length;
 
   const handleTopScroll = useCallback(() => {
     if (bottomScrollRef.current && topScrollRef.current) {
@@ -308,19 +336,35 @@ export function ProfileSalesTable({
     }
   }, []);
 
+  const animFrameRef = useRef<number | null>(null);
+  const columnWidthsRef = useRef(columnWidths);
+  columnWidthsRef.current = columnWidths;
+
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!resizingRef.current) return;
     const { key, startX, startWidth } = resizingRef.current;
     const delta = e.pageX - startX;
-    requestAnimationFrame(() => {
-      setColumnWidths(prev => ({
-        ...prev,
-        [key]: Math.max(50, startWidth + delta)
-      }));
+    const newWidth = Math.max(50, startWidth + delta);
+
+    if (animFrameRef.current !== null) return;
+
+    animFrameRef.current = requestAnimationFrame(() => {
+      animFrameRef.current = null;
+      setColumnWidths(prev => {
+        if (prev[key] === newWidth) return prev;
+        return {
+          ...prev,
+          [key]: newWidth
+        };
+      });
     });
   }, []);
 
   const stopResizing = useCallback(() => {
+    if (animFrameRef.current !== null) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
     resizingRef.current = null;
     document.removeEventListener('mousemove', handleMouseMove);
     document.removeEventListener('mouseup', stopResizing);
@@ -331,11 +375,11 @@ export function ProfileSalesTable({
     resizingRef.current = {
       key,
       startX: e.pageX,
-      startWidth: columnWidths[key] || 100
+      startWidth: columnWidthsRef.current[key] || 100
     };
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', stopResizing);
-  }, [columnWidths, handleMouseMove, stopResizing]);
+  }, [handleMouseMove, stopResizing]);
 
   const handleSort = useCallback((key: string, direction: 'asc' | 'desc' | null) => {
     if (direction === null) setSortConfig(null);
@@ -1301,23 +1345,38 @@ export function ProfileSalesTable({
             <tbody className="[&_tr:last-child]:border-0">
               {processedData.length === 0 ? (
                 <tr>
-                  <td colSpan={7 + (isBatch ? 1 : 0) + columns.length} className="h-32 text-center text-black/30 italic">
+                  <td colSpan={totalColSpan} className="h-32 text-center text-black/30 italic">
                     暂无销料数据
                   </td>
                 </tr>
               ) : (
-                processedData.map((item, idx) => (
-                  <ProfileSalesRow 
-                    key={item.id}
-                    item={item}
-                    idx={idx}
-                    columns={columns}
-                    columnWidths={columnWidths}
-                    stickyLefts={stickyLefts}
-                    isBatch={isBatch}
-                    onUpdateOrderValue={updateOrderValue}
-                  />
-                ))
+                <>
+                  {paddingTop > 0 && (
+                    <tr style={{ height: `${paddingTop}px` }}>
+                      <td colSpan={totalColSpan} style={{ height: `${paddingTop}px`, padding: 0, border: 0 }} />
+                    </tr>
+                  )}
+                  {virtualRows.map((virtualRow) => {
+                    const item = processedData[virtualRow.index];
+                    return (
+                      <ProfileSalesRow 
+                        key={item.id}
+                        item={item}
+                        idx={virtualRow.index}
+                        columns={columns}
+                        columnWidths={columnWidths}
+                        stickyLefts={stickyLefts}
+                        isBatch={isBatch}
+                        onUpdateOrderValue={updateOrderValue}
+                      />
+                    );
+                  })}
+                  {paddingBottom > 0 && (
+                    <tr style={{ height: `${paddingBottom}px` }}>
+                      <td colSpan={totalColSpan} style={{ height: `${paddingBottom}px`, padding: 0, border: 0 }} />
+                    </tr>
+                  )}
+                </>
               )}
             </tbody>
           </table>
@@ -1366,4 +1425,4 @@ export function ProfileSalesTable({
       />
     </Card>
   );
-}
+});
