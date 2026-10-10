@@ -79,7 +79,9 @@ export const ProfileSalesRow = React.memo(function ProfileSalesRow({
   isBatch,
   onUpdateOrderValue,
 }: ProfileSalesRowProps) {
-  const remainingValue = item.quantity - columns.reduce((sum, col) => sum + (item.orders?.[col.id] || 0), 0);
+  const remainingValue = (item as any)._remaining !== undefined 
+    ? (item as any)._remaining 
+    : item.quantity - columns.reduce((sum, col) => sum + (item.orders?.[col.id] || 0), 0);
   const isRed = remainingValue < 0;
 
   const getStickyTdStyle = (key: string) => {

@@ -32,7 +32,7 @@ interface FixedLengthTableProps {
   stocks?: StockItem[];
 }
 
-export function FixedLengthTable({ 
+export const FixedLengthTable = React.memo(function FixedLengthTable({ 
   models, 
   plans, 
   onUpdatePlan, 
@@ -252,4 +252,4 @@ export function FixedLengthTable({
       </CardContent>
     </Card>
   );
-}
+});
