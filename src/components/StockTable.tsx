@@ -1,5 +1,6 @@
 
 import React, { useState, useMemo, useRef, useCallback } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { 
   Table, 
   TableBody, 
@@ -62,7 +63,195 @@ type SortConfig = {
   direction: 'asc' | 'desc';
 } | null;
 
-export function StockTable({ data, setData, salesData = [], purchases, settings }: StockTableProps) {
+interface StockInputCellProps {
+  initialValue: string | number;
+  type?: 'text' | 'number';
+  className?: string;
+  isFloat?: boolean;
+  placeholder?: string;
+  onCommit: (val: any) => void;
+}
+
+const StockInputCell = React.memo(function StockInputCell({
+  initialValue,
+  type = 'text',
+  className,
+  isFloat = false,
+  placeholder,
+  onCommit
+}: StockInputCellProps) {
+  const [val, setVal] = useState<string>(initialValue === 0 && type === 'number' ? '' : String(initialValue ?? ''));
+
+  React.useEffect(() => {
+    setVal(initialValue === 0 && type === 'number' ? '' : String(initialValue ?? ''));
+  }, [initialValue, type]);
+
+  const handleBlur = () => {
+    let parsed: any = val;
+    if (type === 'number') {
+      parsed = isFloat ? (parseFloat(val) || 0) : (parseInt(val, 10) || 0);
+    }
+    if (parsed !== initialValue) {
+      onCommit(parsed);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      let parsed: any = val;
+      if (type === 'number') {
+        parsed = isFloat ? (parseFloat(val) || 0) : (parseInt(val, 10) || 0);
+      }
+      if (parsed !== initialValue) {
+        onCommit(parsed);
+      }
+    }
+  };
+
+  return (
+    <Input
+      type={type}
+      value={val}
+      placeholder={placeholder}
+      onChange={e => setVal(e.target.value)}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
+      className={className}
+    />
+  );
+});
+
+interface StockRowProps {
+  item: StockItem;
+  idx: number;
+  isSelected: boolean;
+  columnWidths: Record<string, number>;
+  onRowClick: (id: string, e: React.MouseEvent) => void;
+  onMouseDown: (id: string, e: React.MouseEvent) => void;
+  onMouseEnter: (id: string) => void;
+  onToggleSelect: (id: string, e: React.MouseEvent) => void;
+  onUpdateItem: (id: string, field: keyof StockItem, value: any) => void;
+  onDeleteItem: (id: string) => void;
+}
+
+const StockRow = React.memo(function StockRow({
+  item,
+  idx,
+  isSelected,
+  columnWidths,
+  onRowClick,
+  onMouseDown,
+  onMouseEnter,
+  onToggleSelect,
+  onUpdateItem,
+  onDeleteItem,
+}: StockRowProps) {
+  return (
+    <TableRow 
+      className={cn(
+        "group transition-colors border-b border-black/[0.03] last:border-0",
+        isSelected ? "bg-orange-50/60 hover:bg-orange-50" : "hover:bg-black/[0.01]"
+      )}
+      onClick={(e) => onRowClick(item.id, e)}
+      onMouseDown={(e) => onMouseDown(item.id, e)}
+      onMouseEnter={() => onMouseEnter(item.id)}
+    >
+      <TableCell style={{ width: columnWidths.selection }} className="px-3 relative z-10"
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleSelect(item.id, e);
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-center cursor-pointer p-1">
+          {isSelected ? <CheckSquare className="h-4 w-4 text-orange-600" /> : <Square className="h-4 w-4 text-black/10 group-hover:text-black/20" />}
+        </div>
+      </TableCell>
+      <TableCell style={{ width: columnWidths.index || 55 }} className="p-1 px-2 text-center text-xs font-mono text-black/50 select-none">
+        {idx + 1}
+      </TableCell>
+      <TableCell style={{ width: columnWidths.model }} className="p-1 px-3">
+        <StockInputCell 
+          initialValue={item.model} 
+          onCommit={(val) => onUpdateItem(item.id, 'model', val)}
+          className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs"
+        />
+      </TableCell>
+      <TableCell style={{ width: columnWidths.length }} className="p-1 px-3">
+        <StockInputCell 
+          type="number"
+          isFloat={true}
+          initialValue={item.length || ''} 
+          onCommit={(val) => onUpdateItem(item.id, 'length', val)}
+          className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs font-mono"
+        />
+      </TableCell>
+      <TableCell style={{ width: columnWidths.quantity }} className="p-1 px-3">
+        <StockInputCell 
+          type="number" 
+          initialValue={item.quantity || ''} 
+          onCommit={(val) => onUpdateItem(item.id, 'quantity', val)}
+          className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs font-mono"
+        />
+      </TableCell>
+      <TableCell style={{ width: columnWidths.color }} className="p-1 px-3">
+        <StockInputCell 
+          initialValue={item.color} 
+          onCommit={(val) => onUpdateItem(item.id, 'color', val)}
+          className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs"
+        />
+      </TableCell>
+      <TableCell style={{ width: columnWidths.orderNumber || 100 }} className="p-1 px-3">
+        <StockInputCell 
+          initialValue={item.orderNumber || ''} 
+          placeholder="自动导入"
+          onCommit={(val) => onUpdateItem(item.id, 'orderNumber', val)}
+          className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs"
+        />
+      </TableCell>
+      <TableCell style={{ width: columnWidths.remarks }} className="p-1 px-3">
+        <StockInputCell 
+          initialValue={item.remarks} 
+          onCommit={(val) => onUpdateItem(item.id, 'remarks', val)}
+          className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs"
+        />
+      </TableCell>
+      <TableCell style={{ width: columnWidths.actions }} className="text-right pr-4">
+        <Button 
+          variant="ghost" size="icon" 
+          onClick={(e) => { e.stopPropagation(); onDeleteItem(item.id); }}
+          className="h-7 w-7 text-black/10 hover:text-red-600 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-opacity" 
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </TableCell>
+    </TableRow>
+  );
+}, (prevProps, nextProps) => {
+  if (prevProps.isSelected !== nextProps.isSelected) return false;
+  if (prevProps.idx !== nextProps.idx) return false;
+  if (prevProps.item !== nextProps.item) {
+    if (
+      prevProps.item.id !== nextProps.item.id ||
+      prevProps.item.model !== nextProps.item.model ||
+      prevProps.item.length !== nextProps.item.length ||
+      prevProps.item.quantity !== nextProps.item.quantity ||
+      prevProps.item.color !== nextProps.item.color ||
+      prevProps.item.orderNumber !== nextProps.item.orderNumber ||
+      prevProps.item.remarks !== nextProps.item.remarks
+    ) {
+      return false;
+    }
+  }
+  if (prevProps.columnWidths !== nextProps.columnWidths) {
+    for (const key of Object.keys(nextProps.columnWidths)) {
+      if (prevProps.columnWidths[key] !== nextProps.columnWidths[key]) return false;
+    }
+  }
+  return true;
+});
+
+export const StockTable = React.memo(function StockTable({ data, setData, salesData = [], purchases, settings }: StockTableProps) {
   const [sortConfig, setSortConfig] = useTableState<SortConfig>('stock_sort', null);
   const [filters, setFilters] = useTableState<Partial<Record<keyof StockItem, string>>>('stock_filters', {});
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -116,13 +305,20 @@ export function StockTable({ data, setData, salesData = [], purchases, settings 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({
     selection: 40,
     index: 55,
-    model: 320,    
+    model: 240,    
     length: 120,
     quantity: 100,
-    color: 120,    
+    color: 120,
+    orderNumber: 120,    
     remarks: 150,  
     actions: 60
   });
+
+  const totalCalculatedWidth = useMemo(() => {
+    return Object.values(columnWidths).reduce((a, b) => a + b, 0);
+  }, [columnWidths]);
+
+  const parentRef = useRef<HTMLDivElement>(null);
 
   const handleExportExcel = () => {
     if (data.length === 0) {
@@ -216,6 +412,18 @@ export function StockTable({ data, setData, salesData = [], purchases, settings 
     return result;
   }, [data, sortConfig, filters]);
 
+  const rowVirtualizer = useVirtualizer({
+    count: processedData.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 41,
+    overscan: 10,
+  });
+
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const totalVirtualSize = rowVirtualizer.getTotalSize();
+  const paddingTop = virtualRows.length > 0 ? virtualRows[0]?.start || 0 : 0;
+  const paddingBottom = virtualRows.length > 0 ? totalVirtualSize - (virtualRows[virtualRows.length - 1]?.end || 0) : 0;
+
   // Selection handlers
   const handleRowClick = (id: string, event: React.MouseEvent) => {
     const newSelected = new Set(selectedIds);
@@ -283,16 +491,34 @@ export function StockTable({ data, setData, salesData = [], purchases, settings 
     setData([...data, ...newItems]);
   };
 
-  const updateItem = (id: string, field: keyof StockItem, value: any) => {
+  const updateItem = useCallback((id: string, field: keyof StockItem, value: any) => {
     setData(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
-  };
+  }, [setData]);
+
+  const handleToggleSelect = useCallback((id: string, e?: React.MouseEvent) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setLastClickedId(id);
+  }, []);
+
+  const handleDeleteItem = useCallback((id: string) => {
+    setData(prev => prev.filter(i => i.id !== id));
+  }, [setData]);
+
+  const handleUpdateItem = useCallback((id: string, field: keyof StockItem, value: any) => {
+    updateItem(id, field, value);
+  }, [updateItem]);
 
   const HeaderCell = ({ label, columnKey, widthKey }: { label: string, columnKey: string, widthKey: string }) => {
     const [open, setOpen] = useState(false);
     const isActive = sortConfig?.key === columnKey || filters[columnKey as keyof StockItem];
     
     return (
-      <TableHead style={{ width: columnWidths[widthKey] }} className="p-0 font-medium relative group/head">
+      <TableHead style={{ width: columnWidths[widthKey] }} className="p-0 font-medium relative group/head bg-stone-50">
         <Popover open={open} onOpenChange={setOpen}>
           <PopoverTrigger className={cn(
             "flex items-center justify-between w-full h-full px-3 py-2 hover:bg-black/5 transition-colors group outline-none cursor-pointer",
@@ -434,12 +660,15 @@ export function StockTable({ data, setData, salesData = [], purchases, settings 
           </Button>
         </div>
       </CardHeader>
-      <CardContent className="p-0 sm:p-6 sm:pt-0 overflow-x-auto text-[13px]">
-        <div className="rounded-md border border-black/5 min-w-full inline-block">
-          <Table className="select-none table-fixed">
-            <TableHeader className="bg-black/[0.03] border-b border-black/5">
-              <TableRow>
-                <TableHead style={{ width: columnWidths.selection }} className="px-3 relative group/head">
+      <CardContent className="p-0 sm:p-6 sm:pt-0 text-[13px]">
+        <div 
+          ref={parentRef}
+          className="rounded-md border border-black/5 w-full overflow-auto max-h-[650px] custom-scrollbar print:overflow-visible print:max-h-none"
+        >
+          <table style={{ width: totalCalculatedWidth, minWidth: '100%' }} className="w-full caption-bottom text-sm select-none table-fixed">
+            <TableHeader className="bg-stone-50 border-b border-black/5 sticky top-0 z-20 shadow-sm">
+              <TableRow className="hover:bg-transparent">
+                <TableHead style={{ width: columnWidths.selection }} className="px-3 relative group/head bg-stone-50">
                   <div className="flex items-center justify-center cursor-pointer p-1 rounded hover:bg-black/5" onClick={toggleSelectAll}>
                     {selectedIds.size === processedData.length && processedData.length > 0 ? <CheckSquare className="h-4 w-4 text-orange-600" /> : <Square className="h-4 w-4 text-black/20" />}
                   </div>
@@ -455,7 +684,7 @@ export function StockTable({ data, setData, salesData = [], purchases, settings 
                 <HeaderCell label="颜色" columnKey="color" widthKey="color" />
                 <HeaderCell label="单号源" columnKey="orderNumber" widthKey="orderNumber" />
                 <HeaderCell label="备注" columnKey="remarks" widthKey="remarks" />
-                <TableHead style={{ width: columnWidths.actions }} className="text-right pr-4 text-[10px] uppercase font-bold text-black/40 relative group/head">
+                <TableHead style={{ width: columnWidths.actions }} className="text-right pr-4 text-[10px] uppercase font-bold text-black/40 relative group/head bg-stone-50">
                   操作
                   <div 
                     className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-orange-400/50 transition-colors z-10"
@@ -467,96 +696,46 @@ export function StockTable({ data, setData, salesData = [], purchases, settings 
             <TableBody>
               {processedData.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="h-32 text-center text-black/30 italic">
+                  <TableCell colSpan={9} className="h-32 text-center text-black/30 italic">
                     {data.length === 0 ? "暂无原材料" : "未找到匹配项"}
                   </TableCell>
                 </TableRow>
               ) : (
-                processedData.map((item, idx) => (
-                  <TableRow 
-                    key={item.id} 
-                    className={cn(
-                      "group transition-colors border-b border-black/[0.03] last:border-0",
-                      selectedIds.has(item.id) ? "bg-orange-50/60 hover:bg-orange-50" : "hover:bg-black/[0.01]"
-                    )}
-                    onClick={(e) => handleRowClick(item.id, e)}
-                    onMouseDown={(e) => handleMouseDown(item.id, e)}
-                    onMouseEnter={() => handleMouseEnter(item.id)}
-                  >
-                    <TableCell style={{ width: columnWidths.selection }} className="px-3 relative z-10"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const newSelected = new Set(selectedIds);
-                        if (newSelected.has(item.id)) {
-                          newSelected.delete(item.id);
-                        } else {
-                          newSelected.add(item.id);
-                        }
-                        setSelectedIds(newSelected);
-                        setLastClickedId(item.id);
-                      }}
-                      onMouseDown={(e) => e.stopPropagation()}
-                    >
-                      <div className="flex items-center justify-center cursor-pointer p-1">
-                        {selectedIds.has(item.id) ? <CheckSquare className="h-4 w-4 text-orange-600" /> : <Square className="h-4 w-4 text-black/10 group-hover:text-black/20" />}
-                      </div>
-                    </TableCell>
-                    <TableCell style={{ width: columnWidths.index || 55 }} className="p-1 px-2 text-center text-xs font-mono text-black/50 select-none">
-                      {idx + 1}
-                    </TableCell>
-                    <TableCell style={{ width: columnWidths.model }} className="p-1 px-3">
-                      <Input 
-                        value={item.model} onChange={(e) => updateItem(item.id, 'model', e.target.value)}
-                        className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs"
+                <>
+                  {paddingTop > 0 && (
+                    <TableRow style={{ height: `${paddingTop}px` }}>
+                      <TableCell colSpan={9} style={{ height: `${paddingTop}px`, padding: 0, border: 0 }} />
+                    </TableRow>
+                  )}
+                  {virtualRows.map((virtualRow) => {
+                    const item = processedData[virtualRow.index];
+                    return (
+                      <StockRow
+                        key={item.id}
+                        item={item}
+                        idx={virtualRow.index}
+                        isSelected={selectedIds.has(item.id)}
+                        columnWidths={columnWidths}
+                        onRowClick={handleRowClick}
+                        onMouseDown={handleMouseDown}
+                        onMouseEnter={handleMouseEnter}
+                        onToggleSelect={handleToggleSelect}
+                        onUpdateItem={handleUpdateItem}
+                        onDeleteItem={handleDeleteItem}
                       />
-                    </TableCell>
-                    <TableCell style={{ width: columnWidths.length }} className="p-1 px-3">
-                      <Input 
-                        type="number" value={item.length || ''} onChange={(e) => updateItem(item.id, 'length', parseFloat(e.target.value) || 0)}
-                        className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs font-mono"
-                      />
-                    </TableCell>
-                    <TableCell style={{ width: columnWidths.quantity }} className="p-1 px-3">
-                      <Input 
-                        type="number" value={item.quantity || ''} onChange={(e) => updateItem(item.id, 'quantity', parseInt(e.target.value) || 0)}
-                        className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs font-mono"
-                      />
-                    </TableCell>
-                    <TableCell style={{ width: columnWidths.color }} className="p-1 px-3">
-                      <Input 
-                        value={item.color} onChange={(e) => updateItem(item.id, 'color', e.target.value)}
-                        className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs"
-                      />
-                    </TableCell>
-                    <TableCell style={{ width: columnWidths.orderNumber || 100 }} className="p-1 px-3">
-                      <Input 
-                        value={item.orderNumber || ''} onChange={(e) => updateItem(item.id, 'orderNumber', e.target.value)}
-                        className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs"
-                        placeholder="自动导入"
-                      />
-                    </TableCell>
-                    <TableCell style={{ width: columnWidths.remarks }} className="p-1 px-3">
-                      <Input 
-                        value={item.remarks} onChange={(e) => updateItem(item.id, 'remarks', e.target.value)}
-                        className="h-8 border-transparent hover:border-black/5 focus:border-orange-500 bg-transparent transition-all text-xs"
-                      />
-                    </TableCell>
-                    <TableCell style={{ width: columnWidths.actions }} className="text-right pr-4">
-                      <Button 
-                        variant="ghost" size="icon" 
-                        onClick={(e) => { e.stopPropagation(); setData(data.filter(i => i.id !== item.id)); }}
-                        className="h-7 w-7 text-black/10 hover:text-red-600 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))
+                    );
+                  })}
+                  {paddingBottom > 0 && (
+                    <TableRow style={{ height: `${paddingBottom}px` }}>
+                      <TableCell colSpan={9} style={{ height: `${paddingBottom}px`, padding: 0, border: 0 }} />
+                    </TableRow>
+                  )}
+                </>
               )}
             </TableBody>
-          </Table>
+          </table>
         </div>
       </CardContent>
     </Card>
   );
-}
+});

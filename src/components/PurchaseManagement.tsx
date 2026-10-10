@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { 
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow 
 } from "@/components/ui/table";
@@ -321,14 +322,14 @@ const PurchaseRow = React.memo(function PurchaseRow({
   return true;
 });
 
-export function PurchaseManagement({ data, setData }: PurchaseManagementProps) {
+export const PurchaseManagement = React.memo(function PurchaseManagement({ data, setData }: PurchaseManagementProps) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [confirmClear, setConfirmClear] = useState(false);
   const [sortConfig, setSortConfig] = useTableState<SortConfig>('purchase_sort', { key: 'orderNumber', direction: 'asc' });
   const [filters, setFilters] = useTableState<Partial<Record<keyof PurchaseItem, string>>>('purchase_filters', {});
   const [lastClickedId, setLastClickedId] = useState<string | null>(null);
 
-  const [colWidths, setColWidths] = useState<Record<string, number>>({
+  const [colWidths, setColWidths] = useTableState<Record<string, number>>('purchase_col_widths', {
     profileName: 135,
     model: 155,
     length: 100,
@@ -339,6 +340,8 @@ export function PurchaseManagement({ data, setData }: PurchaseManagementProps) {
     orderNumber: 120,
     remarks: 120,
   });
+
+  const parentRef = useRef<HTMLDivElement>(null);
 
   const [pasteDialogOpen, setPasteDialogOpen] = useState(false);
   const [pasteText, setPasteText] = useState('');
@@ -403,7 +406,7 @@ export function PurchaseManagement({ data, setData }: PurchaseManagementProps) {
     };
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
-  }, []);
+  }, [setColWidths]);
 
   const displayData = useMemo(() => {
     let result = [...data];
@@ -422,10 +425,15 @@ export function PurchaseManagement({ data, setData }: PurchaseManagementProps) {
     if (sortConfig) {
       const { key, direction } = sortConfig;
       result.sort((a, b) => {
-        const aVal = a[key] ?? '';
-        const bVal = b[key] ?? '';
-        if (aVal < bVal) return direction === 'asc' ? -1 : 1;
-        if (aVal > bVal) return direction === 'asc' ? 1 : -1;
+        const aVal = a[key];
+        const bVal = b[key];
+        if (typeof aVal === 'number' && typeof bVal === 'number') {
+          return direction === 'asc' ? aVal - bVal : bVal - aVal;
+        }
+        const sA = String(aVal ?? '');
+        const sB = String(bVal ?? '');
+        if (sA < sB) return direction === 'asc' ? -1 : 1;
+        if (sA > sB) return direction === 'asc' ? 1 : -1;
         return 0;
       });
     }
@@ -433,20 +441,52 @@ export function PurchaseManagement({ data, setData }: PurchaseManagementProps) {
     return result;
   }, [data, sortConfig, filters]);
 
+  const rowVirtualizer = useVirtualizer({
+    count: displayData.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 41,
+    overscan: 10,
+  });
+
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const totalVirtualSize = rowVirtualizer.getTotalSize();
+  const paddingTop = virtualRows.length > 0 ? virtualRows[0]?.start || 0 : 0;
+  const paddingBottom = virtualRows.length > 0 ? totalVirtualSize - (virtualRows[virtualRows.length - 1]?.end || 0) : 0;
+
+  const totalCalculatedWidth = useMemo(() => {
+    return 40 + 40 + 
+      (colWidths.profileName || 135) +
+      (colWidths.model || 155) +
+      (colWidths.length || 100) +
+      (colWidths.color || 70) +
+      (colWidths.quantity || 80) +
+      (colWidths.linearDensity || 100) +
+      (colWidths.weight || 80) +
+      (colWidths.orderNumber || 120) +
+      (colWidths.remarks || 120);
+  }, [colWidths]);
+
+  const displayDataRef = useRef(displayData);
+  displayDataRef.current = displayData;
+  const lastClickedIdRef = useRef(lastClickedId);
+  lastClickedIdRef.current = lastClickedId;
+
   const toggleSelect = useCallback((id: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
+    const currentDisplayData = displayDataRef.current;
+    const currentLastClickedId = lastClickedIdRef.current;
     setSelectedIds(prevSelected => {
       const newSelected = new Set(prevSelected);
-      if (e?.shiftKey && lastClickedId) {
-        const currentIndex = displayData.findIndex(item => item.id === id);
-        const lastIndex = displayData.findIndex(item => item.id === lastClickedId);
+      if (e?.shiftKey && currentLastClickedId) {
+        const currentIndex = currentDisplayData.findIndex(item => item.id === id);
+        const lastIndex = currentDisplayData.findIndex(item => item.id === currentLastClickedId);
         if (currentIndex !== -1 && lastIndex !== -1) {
           const start = Math.min(currentIndex, lastIndex);
           const end = Math.max(currentIndex, lastIndex);
           const isSelecting = !prevSelected.has(id);
           for (let i = start; i <= end; i++) {
-            if (isSelecting) newSelected.add(displayData[i].id);
-            else newSelected.delete(displayData[i].id);
+            if (isSelecting) newSelected.add(currentDisplayData[i].id);
+            else newSelected.delete(currentDisplayData[i].id);
           }
         }
       } else {
@@ -456,16 +496,17 @@ export function PurchaseManagement({ data, setData }: PurchaseManagementProps) {
       return newSelected;
     });
     setLastClickedId(id);
-  }, [displayData, lastClickedId]);
+  }, []);
 
   const toggleSelectAll = useCallback(() => {
+    const currentDisplayData = displayDataRef.current;
     setSelectedIds(prev => {
-      if (prev.size === displayData.length && displayData.length > 0) {
+      if (prev.size === currentDisplayData.length && currentDisplayData.length > 0) {
         return new Set();
       }
-      return new Set(displayData.map(item => item.id));
+      return new Set(currentDisplayData.map(item => item.id));
     });
-  }, [displayData]);
+  }, []);
 
   const handlePasteImport = () => {
     if (!pasteText.trim()) return;
@@ -682,13 +723,19 @@ export function PurchaseManagement({ data, setData }: PurchaseManagementProps) {
       </CardHeader>
       
       <CardContent className="p-0 overflow-hidden flex flex-col flex-grow print:overflow-visible print:block">
-        <div className="border-b shadow-sm border-black/5 bg-[#F5F5F4] z-10 sticky top-0 print:static print:bg-transparent" style={{ paddingRight: 'var(--scrollbar-width, 0)' }}>
-          <Table>
-            <TableHeader>
+        <div 
+          ref={parentRef}
+          className="overflow-auto flex-grow relative h-full custom-scrollbar print:overflow-visible print:h-auto print:block"
+        >
+          <table 
+            style={{ width: totalCalculatedWidth, minWidth: '100%' }} 
+            className="w-full caption-bottom text-sm select-none table-fixed border-collapse"
+          >
+            <TableHeader className="bg-[#F5F5F4] border-b shadow-sm border-black/5 sticky top-0 z-20 print:static print:bg-transparent">
               <TableRow className="hover:bg-transparent border-none">
-                <TableHead className="w-[40px] text-center px-0">
+                <TableHead style={{ width: 40 }} className="text-center px-0 bg-[#F5F5F4]">
                   <Button variant="ghost" size="icon" className="h-8 w-8 text-black/40 hover:text-black" onClick={toggleSelectAll}>
-                    {selectedIds.size === displayData.length && displayData.length > 0 ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
+                    {selectedIds.size === displayData.length && displayData.length > 0 ? <CheckSquare className="h-4 w-4 text-orange-600" /> : <Square className="h-4 w-4" />}
                   </Button>
                 </TableHead>
                 <PurchaseHeaderCell 
@@ -785,33 +832,46 @@ export function PurchaseManagement({ data, setData }: PurchaseManagementProps) {
                 <TableHead style={{ width: 40 }} className="bg-[#F5F5F4]" />
               </TableRow>
             </TableHeader>
-          </Table>
-        </div>
-
-        <div className="overflow-auto flex-grow relative h-full print:overflow-visible print:h-auto print:block">
-          <Table>
             <TableBody>
-              {displayData.map((item) => (
-                <PurchaseRow
-                  key={item.id}
-                  item={item}
-                  isSelected={selectedIds.has(item.id)}
-                  colWidths={colWidths}
-                  onToggleSelect={toggleSelect}
-                  onUpdateItem={updateItem}
-                  onDeleteItem={deleteSingleItem}
-                />
-              ))}
-              {displayData.length === 0 && (
+              {displayData.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="h-24 text-center text-black/40">暂无筛选或记录数据</TableCell>
+                  <TableCell colSpan={11} className="h-32 text-center text-black/40 italic">
+                    {data.length === 0 ? "暂无采购记录" : "未找到匹配项"}
+                  </TableCell>
                 </TableRow>
+              ) : (
+                <>
+                  {paddingTop > 0 && (
+                    <TableRow style={{ height: `${paddingTop}px` }}>
+                      <TableCell colSpan={11} style={{ height: `${paddingTop}px`, padding: 0, border: 0 }} />
+                    </TableRow>
+                  )}
+                  {virtualRows.map((virtualRow) => {
+                    const item = displayData[virtualRow.index];
+                    return (
+                      <PurchaseRow
+                        key={item.id}
+                        item={item}
+                        isSelected={selectedIds.has(item.id)}
+                        colWidths={colWidths}
+                        onToggleSelect={toggleSelect}
+                        onUpdateItem={updateItem}
+                        onDeleteItem={deleteSingleItem}
+                      />
+                    );
+                  })}
+                  {paddingBottom > 0 && (
+                    <TableRow style={{ height: `${paddingBottom}px` }}>
+                      <TableCell colSpan={11} style={{ height: `${paddingBottom}px`, padding: 0, border: 0 }} />
+                    </TableRow>
+                  )}
+                </>
               )}
             </TableBody>
-          </Table>
+          </table>
         </div>
       </CardContent>
     </Card>
   );
-}
+});
 
