@@ -7,7 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Worker } from 'worker_threads';
 import { optimizeCutting } from './src/lib/optimizer.server.ts';
-import { createIpGate, isPrivateOrLocalIp } from './ip-gate.js';
+import { createIpGate, isPrivateOrLocalIp, injectTrialBanner } from './ip-gate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -253,11 +253,23 @@ app.post('/api/cancel/:taskId', (req, res) => {
 });
 
 // 1. 让 Express 能够识别并提供 dist 文件夹里的静态资源（js, css, 图片等）
+//    index:false —— 首页也走下面的兜底路由，以便给试用中的访问注入顶部横幅
 const distPath = path.join(process.cwd(), 'dist'); 
-app.use(express.static(distPath));
+app.use(express.static(distPath, { index: false }));
 
-// 2. 兜底路由：把所有非 API 的请求，全部重定向到 dist/index.html，交给前端 React 路由处理
+// 2. 兜底路由：把所有非 API 的请求，全部交给 dist/index.html，由前端 React 路由处理；
+//    试用中的访问（req.trialBanner 由 ip-gate 挂上）会在 HTML 顶部注入试用横幅
 app.get('*', (req, res) => {
+  const tb = (req as any).trialBanner;
+  if (tb && typeof tb.daysLeft === 'number' && typeof tb.visitsLeft === 'number') {
+    try {
+      const raw = fs.readFileSync(path.join(distPath, 'index.html'), 'utf-8');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(injectTrialBanner(raw, tb.daysLeft, tb.visitsLeft));
+    } catch (e) {
+      console.warn('[ip-gate] 横幅注入失败，回退原生 index.html:', String((e as any)?.message || e));
+    }
+  }
   res.sendFile(path.join(distPath, 'index.html'));
 });
 

@@ -1,5 +1,5 @@
 // 测试 ip-gate.ts 的门控逻辑（node 直接运行，文件是纯 JS 写法）
-import { createIpGate, normalizeIp, loadWhitelist, isPageLoad, isPrivateOrLocalIp, getClientIp } from './ip-gate.ts';
+import { createIpGate, normalizeIp, loadWhitelist, isPageLoad, isPrivateOrLocalIp, getClientIp, injectTrialBanner } from './ip-gate.ts';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -69,6 +69,33 @@ ok(getClientIp({ headers: { 'cf-connecting-ip': '113.20.8.186' }, ip: '172.70.21
 ok(getClientIp({ headers: {}, ip: '172.70.215.85' }) === '172.70.215.85', '无 CF 头时回退 req.ip');
 ok(getClientIp({ headers: { 'cf-connecting-ip': '10.0.0.9' }, ip: '172.70.215.85' }) === '172.70.215.85', 'CF 头为内网时忽略');
 ok(getClientIp({ headers: { 'cf-connecting-ip': ' ::ffff:113.20.8.186 ' }, ip: 'x' }) === '113.20.8.186', 'CF 头做归一化');
+
+console.log('— injectTrialBanner —');
+{
+  const sample = '<html><head><title>t</title></head><body><div id="root"></div></body></html>';
+  const out = injectTrialBanner(sample, 3, 42);
+  ok(out.includes('试用中：剩余 3 天 / 42 次，觉得不错，可以向所有者要软件安装包'), '横幅文案与数字正确');
+  ok(out.indexOf('__trial_banner__') !== -1 && out.indexOf('__trial_banner__') < out.indexOf('</body>'), '横幅注入到 </body> 之前');
+  ok(out.includes('__trial_banner_close__'), '横幅有关闭按钮');
+  const noBody = injectTrialBanner('<html><div>x</div>', 1, 1);
+  ok(noBody.includes('__trial_banner__') && noBody.endsWith('</script>'), '无 </body> 时追加到末尾');
+  ok(!sample.includes('__trial_banner__'), '原 HTML 未被污染（纯函数）');
+}
+
+console.log('— 试用横幅数据透传 —');
+{
+  const gate = createIpGate({ whitelist: new Set(['9.9.9.9']), trialDays: 7, trialMaxVisits: 100 });
+  const req = stubReq('5.5.5.5', 'GET', '/');
+  const r = run(gate, req);
+  ok(r.nextCalled && req.trialBanner && req.trialBanner.daysLeft === 7 && req.trialBanner.visitsLeft === 99, '试用页面访问透传横幅数据（与响应头一致）');
+  ok(String(r.res.headers['x-trial-remaining-visits']) === String(req.trialBanner.visitsLeft), '横幅数据与响应头剩余次数一致');
+  const req2 = stubReq('5.5.5.6', 'GET', '/api/status/1');
+  run(gate, req2);
+  ok(!req2.trialBanner, 'API 请求不透传横幅');
+  const req3 = stubReq('9.9.9.9', 'GET', '/');
+  run(gate, req3);
+  ok(!req3.trialBanner, '白名单不透传横幅');
+}
 
 console.log('— 白名单放行 —');
 {

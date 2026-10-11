@@ -95,6 +95,31 @@ export function isPageLoad(req) {
   return true;
 }
 
+// 试用横幅：注入到 HTML 页面顶部（仅“试用中”的页面访问；白名单/过期页不注入）
+// daysLeft/visitsLeft 为数字，直接拼入文案
+export function injectTrialBanner(html, daysLeft, visitsLeft) {
+  const d = Math.max(0, Number(daysLeft) || 0);
+  const v = Math.max(0, Number(visitsLeft) || 0);
+  const banner =
+    '<div id="__trial_banner__" style="position:fixed;top:0;left:0;right:0;z-index:999999;' +
+    'background:#fffbeb;border-bottom:1px solid #fde68a;color:#92400e;' +
+    'font-size:13px;line-height:1.6;padding:8px 44px 8px 12px;text-align:center;' +
+    "font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;" +
+    'box-shadow:0 2px 8px rgba(0,0,0,.06)">' +
+    `试用中：剩余 ${d} 天 / ${v} 次，觉得不错，可以向所有者要软件安装包` +
+    '<button id="__trial_banner_close__" aria-label="关闭提示" style="position:absolute;right:6px;top:50%;' +
+    'transform:translateY(-50%);border:none;background:transparent;color:#92400e;' +
+    'font-size:15px;cursor:pointer;padding:6px 10px;line-height:1">✕</button></div>' +
+    '<script>(function(){var b=document.getElementById("__trial_banner__");if(!b)return;' +
+    'var h=b.offsetHeight||37;document.body.style.paddingTop=h+"px";' +
+    'var c=document.getElementById("__trial_banner_close__");' +
+    'if(c){c.addEventListener("click",function(){b.remove();document.body.style.paddingTop="";});}' +
+    '})();<\/script>';
+  if (typeof html !== 'string') return html;
+  if (html.indexOf('</body>') !== -1) return html.replace('</body>', banner + '</body>');
+  return html + banner;
+}
+
 function trialExpiredHtml(reason) {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -174,10 +199,15 @@ export function createIpGate(options) {
     const daysUsed = (now - st.firstSeen) / 86400000;
     if (daysUsed > trialDays) return deny(req, res, '试用期已满');
     if (st.visits >= trialMaxVisits) return deny(req, res, '试用次数已用完');
-    if (isPageLoad(req)) st.visits += 1;
+    const pageLoad = isPageLoad(req);
+    if (pageLoad) st.visits += 1;
+    const daysLeft = Math.max(0, Math.ceil(trialDays - daysUsed));
+    const visitsLeft = Math.max(0, trialMaxVisits - st.visits);
+    // 试用中的页面访问：把剩余额度挂到 req 上，下游的 HTML 兜底路由会注入顶部横幅
+    if (pageLoad) req.trialBanner = { daysLeft, visitsLeft };
     res.setHeader('X-Access-Mode', 'trial');
-    res.setHeader('X-Trial-Remaining-Days', String(Math.max(0, Math.ceil(trialDays - daysUsed))));
-    res.setHeader('X-Trial-Remaining-Visits', String(Math.max(0, trialMaxVisits - st.visits)));
+    res.setHeader('X-Trial-Remaining-Days', String(daysLeft));
+    res.setHeader('X-Trial-Remaining-Visits', String(visitsLeft));
     return next();
   };
 }
