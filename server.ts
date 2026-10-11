@@ -7,15 +7,22 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Worker } from 'worker_threads';
 import { optimizeCutting } from './src/lib/optimizer.server.ts';
+import { createIpGate } from './ip-gate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+// Render 前面有多层代理，信任代理后 req.ip 才能拿到真实客户端 IP（白名单/试用判断依赖它）
+app.set('trust proxy', 1);
 const PORT = parseInt(process.env.API_PORT || '3001', 10);
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// IP 白名单 + 试用额度访问控制：白名单 IP 无障碍，其他 IP 按试用策略（默认 7 天 / 100 次页面访问）
+// 白名单文件：database/ip-whitelist.json；试用参数见 ip-gate.ts 顶部常量
+app.use(createIpGate());
 
 // Task storage
 const tasks = new Map<string, {
