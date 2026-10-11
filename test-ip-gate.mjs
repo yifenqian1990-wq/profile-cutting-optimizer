@@ -1,5 +1,5 @@
 // 测试 ip-gate.ts 的门控逻辑（node 直接运行，文件是纯 JS 写法）
-import { createIpGate, normalizeIp, loadWhitelist, isPageLoad, isPrivateOrLocalIp } from './ip-gate.ts';
+import { createIpGate, normalizeIp, loadWhitelist, isPageLoad, isPrivateOrLocalIp, getClientIp } from './ip-gate.ts';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -9,8 +9,8 @@ function ok(cond, name) {
   if (cond) { pass++; console.log('  ✓', name); }
   else { fail++; console.log('  ✗ FAIL:', name); }
 }
-function stubReq(ip, method, reqPath) {
-  return { ip, method: method || 'GET', path: reqPath || '/', headers: {} };
+function stubReq(ip, method, reqPath, headers) {
+  return { ip, method: method || 'GET', path: reqPath || '/', headers: headers || {} };
 }
 function stubRes() {
   return {
@@ -63,6 +63,12 @@ ok(!isPrivateOrLocalIp('172.15.0.1') && !isPrivateOrLocalIp('172.32.0.1'), '172.
 ok(!isPrivateOrLocalIp('8.8.8.8') && !isPrivateOrLocalIp('113.20.8.186'), '公网 IP 不信任');
 ok(isPrivateOrLocalIp('::ffff:10.0.0.1'), '::ffff: 映射内网');
 ok(isPrivateOrLocalIp('fd12:3456::1') && isPrivateOrLocalIp('fe80::1'), 'IPv6 ULA/link-local');
+
+console.log('— getClientIp —');
+ok(getClientIp({ headers: { 'cf-connecting-ip': '113.20.8.186' }, ip: '172.70.215.85' }) === '113.20.8.186', '优先用 CF-Connecting-IP');
+ok(getClientIp({ headers: {}, ip: '172.70.215.85' }) === '172.70.215.85', '无 CF 头时回退 req.ip');
+ok(getClientIp({ headers: { 'cf-connecting-ip': '10.0.0.9' }, ip: '172.70.215.85' }) === '172.70.215.85', 'CF 头为内网时忽略');
+ok(getClientIp({ headers: { 'cf-connecting-ip': ' ::ffff:113.20.8.186 ' }, ip: 'x' }) === '113.20.8.186', 'CF 头做归一化');
 
 console.log('— 白名单放行 —');
 {

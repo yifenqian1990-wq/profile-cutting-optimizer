@@ -75,6 +75,17 @@ export function isPrivateOrLocalIp(ip) {
   return false;
 }
 
+// 取真实客户端 IP：优先用 Cloudflare 写入的 CF-Connecting-IP
+// （onrender.com 前面挂着 Cloudflare，CF 会把该头覆盖为 TCP 连接的真实来源 IP，
+// 客户端伪造的值会被覆盖，因此可信）；没有该头时回退到 Express 的 req.ip
+// （配合 app.set('trust proxy', 按内网段信任)，防 XFF 左侧伪造）。
+export function getClientIp(req) {
+  const hdrs = req.headers || {};
+  const cf = hdrs['cf-connecting-ip'];
+  if (cf && !isPrivateOrLocalIp(cf)) return normalizeIp(cf);
+  return normalizeIp(req.ip);
+}
+
 // 是否为“页面打开”（计入试用次数）：GET 请求、非 /api、非静态资源
 export function isPageLoad(req) {
   if (!req || req.method !== 'GET') return false;
@@ -139,10 +150,12 @@ export function createIpGate(options) {
   }
 
   return function ipGate(req, res, next) {
-    const ip = normalizeIp(req.ip);
+    const ip = getClientIp(req);
     // 调试头：排查代理层级/真实 IP 用，确认无误后可删除
     res.setHeader('X-Debug-Req-Ip', ip || 'none');
     const hdrs = req.headers || {};
+    const cfi = hdrs['cf-connecting-ip'];
+    if (cfi) res.setHeader('X-Debug-Cf-Ip', String(cfi).slice(0, 64));
     const xff = hdrs['x-forwarded-for'];
     if (xff) res.setHeader('X-Debug-Xff', String(xff).slice(0, 220));
     const xri = hdrs['x-real-ip'];
