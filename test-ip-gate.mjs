@@ -1,5 +1,5 @@
 // 测试 ip-gate.ts 的门控逻辑（node 直接运行，文件是纯 JS 写法）
-import { createIpGate, normalizeIp, loadWhitelist, isPageLoad } from './ip-gate.ts';
+import { createIpGate, normalizeIp, loadWhitelist, isPageLoad, isPrivateOrLocalIp } from './ip-gate.ts';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -10,7 +10,7 @@ function ok(cond, name) {
   else { fail++; console.log('  ✗ FAIL:', name); }
 }
 function stubReq(ip, method, reqPath) {
-  return { ip, method: method || 'GET', path: reqPath || '/' };
+  return { ip, method: method || 'GET', path: reqPath || '/', headers: {} };
 }
 function stubRes() {
   return {
@@ -42,6 +42,9 @@ ok(loadWhitelist(path.join(tmp, 'a.json')).has('1.1.1.1'), '对象map格式读�
 fs.writeFileSync(path.join(tmp, 'b.json'), JSON.stringify(['3.3.3.3']));
 ok(loadWhitelist(path.join(tmp, 'b.json')).has('3.3.3.3'), '纯数组格式读取');
 ok(loadWhitelist(path.join(tmp, 'nope.json')).has('127.0.0.1'), '文件缺失时回退本机');
+fs.writeFileSync(path.join(tmp, 'c.json'), JSON.stringify({ '4.4.4.4': { remark: 'x' }, '_comment': '注释' }));
+const wl = loadWhitelist(path.join(tmp, 'c.json'));
+ok(wl.has('4.4.4.4') && !wl.has('_comment') && wl.size === 1, '_ 开头注释键被跳过');
 
 console.log('— isPageLoad —');
 ok(isPageLoad({ method: 'GET', path: '/' }), 'GET / 计次');
@@ -49,6 +52,17 @@ ok(isPageLoad({ method: 'GET', path: '/foo/bar' }), '深链接计次');
 ok(!isPageLoad({ method: 'GET', path: '/assets/app.123.js' }), '静态资源不计次');
 ok(!isPageLoad({ method: 'GET', path: '/api/optimize' }), 'API 不计次');
 ok(!isPageLoad({ method: 'POST', path: '/' }), 'POST 不计次');
+
+console.log('— isPrivateOrLocalIp —');
+ok(isPrivateOrLocalIp('127.0.0.1'), '回环 v4');
+ok(isPrivateOrLocalIp('::1'), '回环 v6');
+ok(isPrivateOrLocalIp('10.0.5.9'), '10/8');
+ok(isPrivateOrLocalIp('192.168.10.102'), '192.168/16');
+ok(isPrivateOrLocalIp('172.16.0.1') && isPrivateOrLocalIp('172.31.9.9'), '172.16/12');
+ok(!isPrivateOrLocalIp('172.15.0.1') && !isPrivateOrLocalIp('172.32.0.1'), '172.16/12 边界外');
+ok(!isPrivateOrLocalIp('8.8.8.8') && !isPrivateOrLocalIp('113.20.8.186'), '公网 IP 不信任');
+ok(isPrivateOrLocalIp('::ffff:10.0.0.1'), '::ffff: 映射内网');
+ok(isPrivateOrLocalIp('fd12:3456::1') && isPrivateOrLocalIp('fe80::1'), 'IPv6 ULA/link-local');
 
 console.log('— 白名单放行 —');
 {

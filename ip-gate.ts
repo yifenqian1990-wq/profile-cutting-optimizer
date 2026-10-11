@@ -47,9 +47,8 @@ export function loadWhitelist(file) {
       data.forEach(add);
     } else if (data && typeof data === 'object') {
       const inner = data.ips || data.whitelist;
-      if (Array.isArray(inner)) inner.forEach(add);
-      else if (inner && typeof inner === 'object') Object.keys(inner).forEach(add);
-      else Object.keys(data).forEach(add); // {"1.2.3.4": {"remark": "..."}} 形式
+      const keys = Array.isArray(inner) ? inner : inner && typeof inner === 'object' ? Object.keys(inner) : Object.keys(data);
+      keys.forEach((k) => { if (!String(k).startsWith('_')) add(k); }); // _ 开头的是注释键，跳过
     }
   } catch (e) {
     console.warn('[ip-gate] 白名单文件读取失败，使用默认本机白名单:', String((e && e.message) || e));
@@ -61,6 +60,19 @@ export function loadWhitelist(file) {
     set.add('::1');
   }
   return set;
+}
+
+// 判断是否为内网/回环地址（Render 这类云平台的代理层一般使用内网地址转发请求）
+export function isPrivateOrLocalIp(ip) {
+  if (!ip) return false;
+  const s = normalizeIp(ip);
+  if (s === '127.0.0.1' || s === '::1') return true;
+  if (/^10\./.test(s)) return true;
+  if (/^192\.168\./.test(s)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(s)) return true;
+  if (/^fd[0-9a-f]{2}:/.test(s) || s.indexOf('fc00:') === 0) return true; // IPv6 ULA
+  if (s.indexOf('fe80:') === 0) return true; // IPv6 link-local
+  return false;
 }
 
 // 是否为“页面打开”（计入试用次数）：GET 请求、非 /api、非静态资源
@@ -128,6 +140,13 @@ export function createIpGate(options) {
 
   return function ipGate(req, res, next) {
     const ip = normalizeIp(req.ip);
+    // 调试头：排查代理层级/真实 IP 用，确认无误后可删除
+    res.setHeader('X-Debug-Req-Ip', ip || 'none');
+    const hdrs = req.headers || {};
+    const xff = hdrs['x-forwarded-for'];
+    if (xff) res.setHeader('X-Debug-Xff', String(xff).slice(0, 220));
+    const xri = hdrs['x-real-ip'];
+    if (xri) res.setHeader('X-Debug-X-Real-Ip', String(xri).slice(0, 64));
     if (whitelist.has(ip)) {
       res.setHeader('X-Access-Mode', 'whitelist');
       return next();

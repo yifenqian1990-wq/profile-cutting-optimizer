@@ -7,14 +7,16 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Worker } from 'worker_threads';
 import { optimizeCutting } from './src/lib/optimizer.server.ts';
-import { createIpGate } from './ip-gate.js';
+import { createIpGate, isPrivateOrLocalIp } from './ip-gate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-// Render 前面有多层代理，信任代理后 req.ip 才能拿到真实客户端 IP（白名单/试用判断依赖它）
-app.set('trust proxy', 1);
+// 信任代理层：从右往左跳过所有内网 IP，第一个公网 IP 即为真实客户端 IP。
+// 攻击者在 X-Forwarded-For 左侧伪造的 IP 排在真实 IP 左边，永远不会被采信；
+// Render 若直接覆盖 XFF 则更简单——此时唯一的公网 IP 就是客户端。
+app.set('trust proxy', (ip) => isPrivateOrLocalIp(ip));
 const PORT = parseInt(process.env.API_PORT || '3001', 10);
 
 app.use(cors());
