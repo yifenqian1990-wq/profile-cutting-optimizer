@@ -212,6 +212,35 @@ async function getGLPK() {
   return glpkInstance;
 }
 
+function computeGcd(a: number, b: number): number {
+  a = Math.abs(Math.round(a));
+  b = Math.abs(Math.round(b));
+  while (b > 0) {
+    const t = b;
+    b = a % b;
+    a = t;
+  }
+  return a || 1;
+}
+
+// Reusable memory buffers for DP to prevent repeated heap allocation and V8 GC freezes
+let sharedDpBuffer = new Float64Array(65536);
+let sharedChosenBuffer = new Uint8Array(262144);
+
+function getDpBuffers(maxCap: number, splitCount: number) {
+  const stride = maxCap + 1;
+  const neededChosen = splitCount * stride;
+  if (sharedDpBuffer.length < stride) {
+    sharedDpBuffer = new Float64Array(Math.max(stride, sharedDpBuffer.length * 2));
+  }
+  if (sharedChosenBuffer.length < neededChosen) {
+    sharedChosenBuffer = new Uint8Array(Math.max(neededChosen, sharedChosenBuffer.length * 2));
+  }
+  sharedDpBuffer.fill(0, 0, stride);
+  sharedChosenBuffer.fill(0, 0, neededChosen);
+  return { dp: sharedDpBuffer, chosen: sharedChosenBuffer, stride };
+}
+
 export function normalizeModelName(str: string): { 
   raw: string; 
   noSpace: string; 
@@ -1357,17 +1386,55 @@ export async function optimizeCuttingMIP(
       }
       const patterns: Pattern[] = [];
 
-      // 1. Initial Homogeneous Patterns
+      // 1. Initial Patterns: Homogeneous + Greedy Multi-item Combinations (Warm-Start)
       for (let k = 0; k < binTypes.length; k++) {
         if (k === DUMMY_BIN_IDX) continue;
         const bin = binTypes[k];
         const effCap = bin.length - bin.trim * 2 + kerf;
+
+        // Single-demand homogeneous patterns
         for (let i = 0; i < M; i++) {
           const itemW = uniqueDemands[i].length + kerf;
           if (itemW <= effCap) {
             const counts = new Array(M).fill(0);
             counts[i] = Math.floor(effCap / itemW);
             patterns.push({ counts, binIdx: k });
+          }
+        }
+
+        // Multi-item greedy combinations (FFD) to stabilize duals right from iteration 1
+        const sortedItemIndices = Array.from({ length: M }, (_, idx) => idx)
+          .sort((a, b) => uniqueDemands[b].length - uniqueDemands[a].length);
+
+        for (let startIdx = 0; startIdx < M; startIdx++) {
+          let remCap = effCap;
+          const counts = new Array(M).fill(0);
+          const firstItem = sortedItemIndices[startIdx];
+          const firstW = uniqueDemands[firstItem].length + kerf;
+          if (firstW <= remCap) {
+            counts[firstItem] = 1;
+            remCap -= firstW;
+
+            for (let j = 0; j < M; j++) {
+              const it = sortedItemIndices[j];
+              const w = uniqueDemands[it].length + kerf;
+              if (w <= remCap) {
+                const maxFit = Math.floor(remCap / w);
+                const take = Math.min(uniqueDemands[it].qty, maxFit);
+                if (take > 0) {
+                  counts[it] += take;
+                  remCap -= take * w;
+                }
+              }
+            }
+            
+            const distinctCount = counts.filter(c => c > 0).length;
+            if (distinctCount > 1) {
+              const exists = patterns.some(p => p.binIdx === k && p.counts.every((c, idx) => c === counts[idx]));
+              if (!exists) {
+                patterns.push({ counts, binIdx: k });
+              }
+            }
           }
         }
       }
@@ -1378,10 +1445,14 @@ export async function optimizeCuttingMIP(
         patterns.push({ counts, binIdx: DUMMY_BIN_IDX });
       }
 
-      // 2. Column Generation Loop
+      // 2. Column Generation Loop (Enhanced with Fast Heuristic Pricing, Shared Buffers, GCD Reduction)
       let cgIter = 0;
       let resRelax: any = null;
-      while (cgIter < 60) {
+      let lastObj = Infinity;
+      let stableObjRounds = 0;
+      const MAX_CG_ITERS = 28;
+
+      while (cgIter < MAX_CG_ITERS) {
         cgIter++;
         const lpRelax = {
           name: 'MasterRelaxed',
@@ -1418,6 +1489,18 @@ export async function optimizeCuttingMIP(
         }
         if (!resRelax || (resRelax.result.status !== glpk.GLP_OPT && resRelax.result.status !== glpk.GLP_FEAS)) break;
 
+        const currentObj = resRelax.result.z ?? 0;
+        if (cgIter > 5 && Math.abs(lastObj - currentObj) / (Math.abs(lastObj) + 1.0) < 0.0001) {
+          stableObjRounds++;
+          if (stableObjRounds >= 2) {
+            // Objective stabilized within 0.01% - converged early
+            break;
+          }
+        } else {
+          stableObjRounds = 0;
+        }
+        lastObj = currentObj;
+
         let added = false;
         const pi = new Array(M).fill(0);
         for (let i = 0; i < M; i++) pi[i] = resRelax.result.dual[`dem_${i}`] || 0;
@@ -1428,11 +1511,89 @@ export async function optimizeCuttingMIP(
           }
         }
 
-        // Dynamic Programming Bounded Knapsack (BKP) Pricing Subproblem with One-Pass Sharing
+        // Phase A: Fast Heuristic Pricing (Greedy Knapsack by Dual Value Density)
+        // Solves in microseconds without running heavy DP
+        const positiveDualItems: { idx: number; w: number; qty: number; pi: number; density: number }[] = [];
+        for (let i = 0; i < M; i++) {
+          if (pi[i] > 1e-5) {
+            const w = uniqueDemands[i].length + kerf;
+            positiveDualItems.push({
+              idx: i,
+              w,
+              qty: uniqueDemands[i].qty,
+              pi: pi[i],
+              density: pi[i] / w
+            });
+          }
+        }
+        positiveDualItems.sort((a, b) => b.density - a.density);
+
+        let heuristicAddedCount = 0;
+        if (positiveDualItems.length > 0) {
+          for (let k = 0; k < binTypes.length; k++) {
+            if (k === DUMMY_BIN_IDX) continue;
+            const bin = binTypes[k];
+            const effCap = bin.length - bin.trim * 2 + kerf;
+            if (effCap <= 0) continue;
+
+            let remCap = effCap;
+            let totalVal = 0;
+            const counts = new Array(M).fill(0);
+
+            for (const item of positiveDualItems) {
+              if (item.w <= remCap) {
+                const maxFit = Math.floor(remCap / item.w);
+                const take = Math.min(item.qty, maxFit);
+                if (take > 0) {
+                  counts[item.idx] += take;
+                  remCap -= take * item.w;
+                  totalVal += take * item.pi;
+                }
+              }
+            }
+
+            const reducedCost = bin.cost - totalVal - mu[k];
+            if (reducedCost < -1e-4 && counts.some(c => c > 0)) {
+              const exists = patterns.some(p => p.binIdx === k && p.counts.every((c, idx) => c === counts[idx]));
+              if (!exists) {
+                patterns.push({ counts, binIdx: k });
+                added = true;
+                heuristicAddedCount++;
+                if (heuristicAddedCount >= 4) break;
+              }
+            }
+          }
+        }
+
+        // If Fast Heuristic found negative reduced cost columns, skip DP this iteration!
+        if (heuristicAddedCount > 0) {
+          if (cgIter % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+          continue;
+        }
+
+        // Phase B: Exact Dynamic Programming Bounded Knapsack (BKP) Pricing Subproblem with Shared Buffers & GCD
         const hasDecimals = uniqueDemands.some(d => d.length % 1 !== 0) || 
           binTypes.some(b => b.length % 1 !== 0 || b.trim % 1 !== 0) || 
           kerf % 1 !== 0;
-        const scale = hasDecimals ? 10 : 1;
+        const rawScale = hasDecimals ? 10 : 1;
+
+        let gcdStep = 1;
+        if (!hasDecimals) {
+          let currGcd = Math.round(uniqueDemands[0].length + kerf);
+          for (let i = 1; i < M; i++) {
+            currGcd = computeGcd(currGcd, Math.round(uniqueDemands[i].length + kerf));
+            if (currGcd === 1) break;
+          }
+          if (currGcd > 1) {
+            for (let k = 0; k < binTypes.length; k++) {
+              if (k === DUMMY_BIN_IDX) continue;
+              const b = binTypes[k];
+              currGcd = computeGcd(currGcd, Math.round(b.length - b.trim * 2 + kerf));
+              if (currGcd === 1) break;
+            }
+          }
+          gcdStep = Math.max(1, currGcd);
+        }
 
         let maxEffCap = 0;
         const binEffCaps = new Int32Array(binTypes.length);
@@ -1442,7 +1603,7 @@ export async function optimizeCuttingMIP(
             continue;
           }
           const b = binTypes[k];
-          const cap = Math.max(0, Math.round((b.length - b.trim * 2 + kerf) * scale));
+          const cap = Math.max(0, Math.floor(((b.length - b.trim * 2 + kerf) * rawScale) / gcdStep));
           binEffCaps[k] = cap;
           if (cap > maxEffCap) maxEffCap = cap;
         }
@@ -1458,7 +1619,7 @@ export async function optimizeCuttingMIP(
         for (let i = 0; i < M; i++) {
           const valPerUnit = pi[i];
           if (valPerUnit <= 1e-6) continue;
-          const itemWeight = Math.round((uniqueDemands[i].length + kerf) * scale);
+          const itemWeight = Math.floor(((uniqueDemands[i].length + kerf) * rawScale) / gcdStep);
           if (itemWeight <= 0 || itemWeight > maxEffCap) continue;
 
           // Upper bound: bounded by actual demand quantity and max possible fit in largest bin
@@ -1481,11 +1642,8 @@ export async function optimizeCuttingMIP(
           }
         }
 
-        added = false;
         if (splitItems.length > 0 && maxEffCap > 0) {
-          const dp = new Float64Array(maxEffCap + 1);
-          const stride = maxEffCap + 1;
-          const chosen = new Uint8Array(splitItems.length * stride);
+          const { dp, chosen, stride } = getDpBuffers(maxEffCap, splitItems.length);
 
           for (let itemIdx = 0; itemIdx < splitItems.length; itemIdx++) {
             const item = splitItems[itemIdx];

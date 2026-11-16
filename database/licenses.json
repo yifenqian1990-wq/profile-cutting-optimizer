@@ -7,12 +7,12 @@
     "remark": "自己",
     "expireDate": "2099-12-31"
   },
-  "DEV-1A7C3E2D": {
+  "DEV-EXPIRED": {
     "remark": "过期测试设备",
-    "expireDate": "2099-01-01"
+    "expireDate": "2020-01-01"
   },
   "DEV-1A7C3E2D": {
-    "remark": "新增设备",
+    "remark": "已授权测试设备",
     "expireDate": "2099-12-31"
   }
 }
