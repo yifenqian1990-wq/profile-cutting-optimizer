@@ -29,7 +29,10 @@ import {
   FolderOpen,
   FileText,
   Check,
-  ShieldCheck
+  ShieldCheck,
+  Copy,
+  ClipboardPaste,
+  AlertTriangle
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "@/lib/utils";
@@ -69,9 +72,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Textarea } from "@/components/ui/textarea";
 
 export default function App() {
-  const [isAuthorized, setIsAuthorized] = useState<boolean>(false);
+  const [isAuthorized, setIsAuthorized] = useState<boolean>(true);
   const handleActivated = useCallback(() => {
     setIsAuthorized(true);
   }, []);
@@ -621,6 +625,11 @@ export default function App() {
   const [currentOptimizationHandle, setCurrentOptimizationHandle] = useState<any>(null);
   const [historyFolderOpen, setHistoryFolderOpen] = useState(false);
   const [historyList, setHistoryList] = useState<any[]>([]);
+  const [pasteImportOpen, setPasteImportOpen] = useState(false);
+  const [pasteImportText, setPasteImportText] = useState("");
+
+  const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
+  const canUseNativeFilePicker = false;
 
   const sanitizeFileName = (name: string) => {
     return name.replace(/[\\/:*?"<>|\r\n]+/g, "_").trim();
@@ -744,14 +753,29 @@ export default function App() {
     }
   };
 
-  const executeExport = async (forceName?: string, isSaveAs = false): Promise<boolean> => {
+  const deleteHistoryItem = async (itemId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const storageKey = mainMode === 'engineering' ? 'wire-optimizer-engineering-history' : 'wire-optimizer-optimization-history';
+      const rawHistory = await get(storageKey);
+      const history = Array.isArray(rawHistory) ? rawHistory : [];
+      const updated = history.filter((item: any) => item && item.id !== itemId);
+      await set(storageKey, updated);
+      setHistoryList(updated.slice(0, 10));
+      toast.success("已删除该本地缓存记录");
+    } catch (err) {
+      toast.error("删除缓存记录失败");
+    }
+  };
+
+  const buildCurrentProjectData = () => {
     let exportSettings = undefined;
     if (mainMode !== 'engineering') {
       const { ai, printInfo, ...restSettings } = settings as any;
       exportSettings = restSettings;
     }
-    
-    const projectData = mainMode === 'engineering' ? {
+
+    return mainMode === 'engineering' ? {
       version: '1.0',
       timestamp: new Date().toISOString(),
       purchases,
@@ -768,148 +792,127 @@ export default function App() {
       settings: exportSettings,
       results
     };
-    
-    const ext = mainMode === 'engineering' ? '.wce' : '.json';
-    const suggestedName = ensureFileExtension(forceName || getDefaultFileName(isSaveAs), ext);
-    const oldNameForHistory = isSaveAs ? "" : (mainMode === 'engineering' ? currentProjectName : currentOptimizationName);
+  };
 
-    const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
-    
-    const fallbackDownload = async (filename: string) => {
-      const safeName = ensureFileExtension(filename, ext);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = safeName;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      
+  const copyProjectDataToClipboard = async () => {
+    const projectData = buildCurrentProjectData();
+    const jsonText = JSON.stringify(projectData, null, 2);
+    const ext = mainMode === 'engineering' ? '.wce' : '.json';
+    const safeName = ensureFileExtension(exportFileName || getDefaultFileName(isSaveAsExport), ext);
+    const oldNameForHistory = isSaveAsExport ? "" : (mainMode === 'engineering' ? currentProjectName : currentOptimizationName);
+
+    let copied = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(jsonText);
+        copied = true;
+      }
+    } catch (e) {
+      copied = false;
+    }
+
+    if (!copied) {
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = jsonText;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        copied = document.execCommand('copy');
+        document.body.removeChild(textarea);
+      } catch (e) {
+        copied = false;
+      }
+    }
+
+    if (copied) {
       await saveToHistory(safeName, projectData, oldNameForHistory, null);
       if (mainMode === 'engineering') {
         setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
-        if (isSaveAs) setCurrentProjectHandle(null);
+        if (isSaveAsExport) setCurrentProjectHandle(null);
         setSavedEngRev(engRev);
       } else {
         setCurrentOptimizationName(safeName.replace(/\.[^/.]+$/, ""));
-        if (isSaveAs) setCurrentOptimizationHandle(null);
+        if (isSaveAsExport) setCurrentOptimizationHandle(null);
         setSavedOptRev(optRev);
       }
-      toast.success(mainMode === 'engineering' ? "工程数据已保存导出！" : "套裁数据已保存导出！");
-      return true;
-    };
-
-    let result = false;
-    if ('showSaveFilePicker' in window && window.self === window.top) {
-      try {
-        let handle = mainMode === 'engineering' ? currentProjectHandle : currentOptimizationHandle;
-        let shouldShowPicker = !handle || isSaveAs;
-        
-        if (handle && !isSaveAs) {
-          try {
-            if ((await handle.queryPermission({ mode: 'readwrite' })) !== 'granted') {
-              const permission = await handle.requestPermission({ mode: 'readwrite' });
-              if (permission !== 'granted') {
-                shouldShowPicker = true;
-              }
-            }
-          } catch(e) {
-            shouldShowPicker = true;
-          }
-        }
-        
-        if (shouldShowPicker) {
-          const saveTypes = mainMode === 'engineering' 
-            ? [
-                {
-                  description: '工程项目文件 (*.wce)',
-                  accept: {
-                    'application/octet-stream': ['.wce'],
-                    'text/plain': ['.wce']
-                  }
-                },
-                {
-                  description: 'JSON 格式 (*.json)',
-                  accept: {
-                    'application/json': ['.json']
-                  }
-                }
-              ]
-            : [
-                {
-                  description: '优化项目文件 (*.json)',
-                  accept: {
-                    'application/json': ['.json']
-                  }
-                }
-              ];
-
-          handle = await (window as any).showSaveFilePicker({
-            id: mainMode === 'engineering' ? 'engineering-project' : 'optimization-project',
-            suggestedName,
-            types: saveTypes
-          });
-        }
-        
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        
-        await saveToHistory(handle.name, projectData, oldNameForHistory, handle);
-        if (mainMode === 'engineering') {
-          setCurrentProjectName(handle.name.replace(/\.[^/.]+$/, ""));
-          setCurrentProjectHandle(handle);
-          setSavedEngRev(engRev);
-        } else {
-          setCurrentOptimizationName(handle.name.replace(/\.[^/.]+$/, ""));
-          setCurrentOptimizationHandle(handle);
-          setSavedOptRev(optRev);
-        }
-        toast.success(mainMode === 'engineering' ? "工程数据已保存导出！" : "套裁数据已保存导出！");
-        result = true;
-      } catch (e: any) {
-        if (e.name !== 'AbortError') {
-          result = await fallbackDownload(suggestedName);
-        } else {
-          result = false;
-        }
-      }
+      toast.success(`已复制完整 JSON 数据到剪贴板，可新建文本文件并保存为 ${safeName}`);
+      setConfirmExportOpen(false);
     } else {
-      result = await fallbackDownload(suggestedName);
+      toast.error("浏览器限制了剪贴板访问，请在新标签页独立打开后再试");
     }
-    setConfirmExportOpen(false);
-    return result;
   };
 
-  const handleExportProject = async () => {
-    const defaultName = getDefaultFileName(false);
-
-    if ('showSaveFilePicker' in window && window.self === window.top) {
-      try {
-        const ok = await executeExport(defaultName, false);
-        if (ok) return;
-      } catch (err: any) {
-        if (err?.name === 'AbortError') return;
-      }
+  const handlePasteImportSubmit = async () => {
+    const trimmed = pasteImportText.trim();
+    if (!trimmed) {
+      toast.error("请先粘贴导出的 JSON 数据内容");
+      return;
     }
+    try {
+      const data = JSON.parse(trimmed);
+      if (validateAndApplyImportedData(data)) {
+        const defaultName = getDefaultFileName(false);
+        if (mainMode === 'engineering') {
+          setCurrentProjectName(defaultName.replace(/\.[^/.]+$/, ""));
+          setCurrentProjectHandle(null);
+        } else {
+          setCurrentOptimizationName(defaultName.replace(/\.[^/.]+$/, ""));
+          setCurrentOptimizationHandle(null);
+        }
+        await saveToHistory(defaultName, data, "", null);
+        setPasteImportText("");
+        setPasteImportOpen(false);
+        setHistoryFolderOpen(false);
+      }
+    } catch (err) {
+      toast.error("解析失败，请确认粘贴的是完整的 JSON 数据！");
+    }
+  };
+
+  const executeExport = async (forceName?: string, isSaveAs = false): Promise<boolean> => {
+    const projectData = buildCurrentProjectData();
+    const ext = mainMode === 'engineering' ? '.wce' : '.json';
+    const safeName = ensureFileExtension(forceName || getDefaultFileName(isSaveAs), ext);
+    const oldNameForHistory = isSaveAs ? "" : (mainMode === 'engineering' ? currentProjectName : currentOptimizationName);
+
+    const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = safeName;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    await saveToHistory(safeName, projectData, oldNameForHistory, null);
+    if (mainMode === 'engineering') {
+      setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
+      if (isSaveAs) setCurrentProjectHandle(null);
+      setSavedEngRev(engRev);
+    } else {
+      setCurrentOptimizationName(safeName.replace(/\.[^/.]+$/, ""));
+      if (isSaveAs) setCurrentOptimizationHandle(null);
+      setSavedOptRev(optRev);
+    }
+    toast.success(mainMode === 'engineering' ? "工程数据已保存导出！" : "套裁数据已保存导出！");
+    setConfirmExportOpen(false);
+    return true;
+  };
+
+  const handleExportProject = () => {
+    const defaultName = getDefaultFileName(false);
     setIsSaveAsExport(false);
     setExportFileName(defaultName);
     setConfirmExportOpen(true);
   };
 
-  const handleSaveAsProject = async () => {
+  const handleSaveAsProject = () => {
     const defaultName = getDefaultFileName(true);
-
-    if ('showSaveFilePicker' in window && window.self === window.top) {
-      try {
-        const ok = await executeExport(defaultName, true);
-        if (ok) return;
-      } catch (err: any) {
-        if (err?.name === 'AbortError') return;
-      }
-    }
     setIsSaveAsExport(true);
     setExportFileName(defaultName);
     setConfirmExportOpen(true);
@@ -1127,81 +1130,13 @@ export default function App() {
     }
   };
 
-  const handleDirectFileChosen = async (file: File) => {
-    const isDirty = mainMode === 'engineering' ? isEngDirty : isOptDirty;
-    const hasData = mainMode === 'engineering' 
-      ? (purchases.length > 0 || profileSales.length > 0 || savedPlans.length > 0)
-      : (demands.length > 0 || stocks.length > 0 || results !== null);
-
-    if (isDirty || hasData) {
-      setHistoryFolderOpen(false);
-      setImportPendingFile(file);
-      setConfirmImportOpen(true);
-      return;
-    }
-
-    try {
-      const text = await file.text();
-      const data = JSON.parse(text);
-      if (validateAndApplyImportedData(data)) {
-        if (mainMode === 'engineering') {
-          setCurrentProjectName(file.name.replace(/\.[^/.]+$/, ""));
-          setCurrentProjectHandle(null);
-        } else {
-          setCurrentOptimizationName(file.name.replace(/\.[^/.]+$/, ""));
-          setCurrentOptimizationHandle(null);
-        }
-        await saveToHistory(file.name, data, "", null);
-        setHistoryFolderOpen(false);
-        toast.success(mainMode === 'engineering' ? "工程文件导入成功！" : "套裁文件导入成功！");
-      }
-    } catch (err) {
-      toast.error("文件解析失败，请检查文件格式是否为有效的 JSON 格式！");
-    }
-  };
-
   const importFromLocalFile = async (startInHandle?: any) => {
-    if ('showOpenFilePicker' in window && window.self === window.top) {
-      const baseOptions: any = {
-        types: [{
-          description: mainMode === 'engineering' ? '工程文件 (*.wce, *.json)' : '优化文件 (*.json)',
-          accept: {
-            'application/json': ['.json'],
-            'text/plain': ['.wce', '.json'],
-            'application/octet-stream': ['.wce', '.json']
-          }
-        }],
-        excludeAcceptAllOption: false
-      };
-
-      let handle: any = null;
+    if (startInHandle) {
       try {
-        const options = startInHandle ? { ...baseOptions, startIn: startInHandle } : baseOptions;
-        [handle] = await (window as any).showOpenFilePicker(options);
-      } catch (e: any) {
-        if (e.name === 'AbortError') return;
-        // Retry without startIn if handle caused error
-        if (startInHandle) {
-          try {
-            [handle] = await (window as any).showOpenFilePicker(baseOptions);
-          } catch (retryErr: any) {
-            if (retryErr.name === 'AbortError') return;
-            triggerFallbackFileInput();
-            return;
-          }
-        } else {
-          // Fallback to standard <input type="file"> when File System Access API is blocked/unavailable
-          triggerFallbackFileInput();
-          return;
-        }
-      }
-
-      if (!handle) return;
-      try {
+        const handle = startInHandle;
         const file = await handle.getFile();
         const text = await file.text();
         const data = JSON.parse(text);
-        
         if (validateAndApplyImportedData(data)) {
           if (mainMode === 'engineering') {
             setCurrentProjectName(handle.name.replace(/\.[^/.]+$/, ""));
@@ -1214,12 +1149,12 @@ export default function App() {
           setHistoryFolderOpen(false);
           toast.success("本地文件导入成功！");
         }
-      } catch (e: any) {
-        toast.error("文件解析失败，请检查文件格式是否为有效的 JSON！");
+        return;
+      } catch (e) {
+        // Fallback to file input
       }
-    } else {
-      triggerFallbackFileInput();
     }
+    triggerFallbackFileInput();
   };
 
   const handleDeletePlan = useCallback((planId: string, revokeRelated: boolean) => {
@@ -1354,75 +1289,140 @@ export default function App() {
         onChange={handleImportProjectMain}
       />
       
-      <Dialog open={historyFolderOpen} onOpenChange={setHistoryFolderOpen}>
-        <DialogContent className="max-w-md">
+      <Dialog open={historyFolderOpen} onOpenChange={(open) => {
+        setHistoryFolderOpen(open);
+        if (!open) {
+          setPasteImportOpen(false);
+        }
+      }}>
+        <DialogContent
+          className="max-w-md"
+          onDragOver={(e) => {
+            e.preventDefault();
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            const droppedFile = e.dataTransfer?.files?.[0];
+            if (droppedFile) {
+              setHistoryFolderOpen(false);
+              setImportPendingFile(droppedFile);
+              setConfirmImportOpen(true);
+            }
+          }}
+        >
           <DialogHeader>
             <DialogTitle>{mainMode === 'engineering' ? '本地工程历史记录' : '本地套裁历史记录'}</DialogTitle>
             <DialogDescription>
-              {mainMode === 'engineering' ? '选择本地缓存的工程继续工作，或从本地文件导入新工程。' : '选择本地缓存的套裁继续工作，或从本地文件导入新的优化结果。'}
+              {mainMode === 'engineering' ? '选择本地缓存的工程继续工作，或从本地文件导入新工程（支持拖拽文件到此处）。' : '选择本地缓存的套裁继续工作，或从本地文件导入新的优化结果（支持拖拽文件到此处）。'}
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 max-h-[350px] overflow-y-auto pr-2">
-            {historyList.length > 0 ? (
-              <div className="grid gap-2 mt-4">
-                {historyList.map(item => (
-                  <Button 
-                    key={item.id} 
-                    variant="outline" 
-                    className="justify-start text-left h-auto py-3 px-4 flex flex-col items-start gap-1 relative w-full group"
-                    onClick={() => handleHistoryItemClick(item)}
-                  >
-                    <div className="font-semibold flex items-center justify-between w-full gap-2">
-                      <span className="truncate">{item.name}</span>
-                      {item.handle && (
-                        <span
-                          role="button"
-                          tabIndex={0}
-                          className="text-black/40 hover:text-orange-600 p-1 flex-shrink-0 cursor-pointer"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            importFromLocalFile(item.handle);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              importFromLocalFile(item.handle);
-                            }
-                          }}
-                          title="从该文件所在位置导入其他文件"
-                        >
-                          <FolderOpen className="h-4 w-4" />
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-xs text-black/40">保存时间: {new Date(item.timestamp).toLocaleString()}</div>
-                  </Button>
-                ))}
-              </div>
-            ) : (
-              <div className="text-sm text-black/50 py-8 text-center bg-black/5 rounded-lg">没有找到本地历史记录</div>
-            )}
-          </div>
-          <DialogFooter className="flex items-center gap-2 mt-4">
-            <Button variant="outline" className="flex-1" onClick={() => setHistoryFolderOpen(false)}>取消</Button>
-            <div className="flex-1 relative">
-              <input
-                type="file"
-                accept={mainMode === 'engineering' ? '.wce,.json' : '.json'}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (!file) return;
-                  handleDirectFileChosen(file);
-                  e.target.value = '';
-                }}
-                title="选择本地文件导入"
-              />
-              <Button className="w-full bg-orange-600 hover:bg-orange-700 text-white pointer-events-none">
-                从本地文件导入
-              </Button>
+          {isInIframe && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-600" />
+              <span>当前在预览内嵌窗口中运行，若本地文件弹窗受限，可直接把文件拖入本窗口，或使用「粘贴 JSON 导入」。</span>
             </div>
+          )}
+          {pasteImportOpen ? (
+            <div className="space-y-3 py-2">
+              <Label className="text-xs text-black/60">粘贴之前复制或导出的 JSON 内容</Label>
+              <Textarea
+                value={pasteImportText}
+                onChange={(e) => setPasteImportText(e.target.value)}
+                placeholder='请粘贴以 { 开头的完整 JSON 数据...'
+                className="min-h-[180px] font-mono text-xs"
+              />
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" size="sm" onClick={() => setPasteImportOpen(false)}>返回列表</Button>
+                <Button size="sm" className="bg-orange-600 hover:bg-orange-700 text-white" onClick={handlePasteImportSubmit}>确认粘贴导入</Button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4 max-h-[350px] overflow-y-auto pr-2">
+              {historyList.length > 0 ? (
+                <div className="grid gap-2 mt-4">
+                  {historyList.map(item => (
+                    <Button 
+                      key={item.id} 
+                      variant="outline" 
+                      className="justify-start text-left h-auto py-3 px-4 flex flex-col items-start gap-1 relative w-full group"
+                      onClick={() => handleHistoryItemClick(item)}
+                    >
+                      <div className="font-semibold flex items-center justify-between w-full gap-2">
+                        <span className="truncate">{item.name}</span>
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          {item.handle && canUseNativeFilePicker && (
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              className="text-black/40 hover:text-orange-600 p-1 cursor-pointer"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                importFromLocalFile(item.handle);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  importFromLocalFile(item.handle);
+                                }
+                              }}
+                              title="从该文件所在位置导入其他文件"
+                            >
+                              <FolderOpen className="h-4 w-4" />
+                            </span>
+                          )}
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            className="text-black/30 hover:text-red-600 p-1 cursor-pointer"
+                            onClick={(e) => deleteHistoryItem(item.id, e)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                deleteHistoryItem(item.id, e as any);
+                              }
+                            }}
+                            title="删除该条缓存记录"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </span>
+                        </div>
+                      </div>
+                      <div className="text-xs text-black/40">保存时间: {new Date(item.timestamp).toLocaleString()}</div>
+                    </Button>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-sm text-black/50 py-8 text-center bg-black/5 rounded-lg">没有找到本地历史记录</div>
+              )}
+            </div>
+          )}
+          <DialogFooter className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 mt-4">
+             <Button variant="outline" onClick={() => setHistoryFolderOpen(false)}>取消</Button>
+             <Button variant="outline" className="gap-1.5" onClick={() => setPasteImportOpen(prev => !prev)}>
+               <ClipboardPaste className="h-4 w-4" />
+               {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
+             </Button>
+             {canUseNativeFilePicker ? (
+               <Button className="flex-1 bg-orange-600 hover:bg-orange-700" onClick={() => importFromLocalFile()}>
+                 从本地文件导入
+               </Button>
+             ) : (
+               <div className="relative flex-1 overflow-hidden rounded-md">
+                 <Button type="button" className="w-full bg-orange-600 hover:bg-orange-700 pointer-events-none">
+                   从本地文件导入
+                 </Button>
+                 <input
+                   type="file"
+                   accept=".json,.wce,application/json"
+                   className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                   onChange={(e) => {
+                     handleImportProjectMain(e);
+                     e.target.value = '';
+                   }}
+                 />
+               </div>
+             )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1460,7 +1460,13 @@ export default function App() {
               包含：{mainMode === 'engineering' ? '采购单、销料库、套裁汇总等' : '下料清单、原材料库、计算参数等数据'}。
             </DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 py-4">
+          {isInIframe && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-600" />
+              <span>当前位于内嵌预览窗口，浏览器安全限制会禁用直接写入磁盘，部分内嵌容器也会拦截文件下载。若点击确认保存未触发下载，请点击预览右上角「在新标签页打开」，或点击下方「复制 JSON 数据」备份。</span>
+            </div>
+          )}
+          <div className="grid gap-4 py-2">
             <Label>保存文件名格式</Label>
             <Input
               value={exportFileName}
@@ -1472,8 +1478,12 @@ export default function App() {
               }}
             />
           </div>
-          <DialogFooter>
+          <DialogFooter className="flex flex-col sm:flex-row gap-2">
             <Button variant="outline" onClick={() => setConfirmExportOpen(false)}>取消</Button>
+            <Button variant="outline" className="gap-1.5" onClick={copyProjectDataToClipboard}>
+              <Copy className="h-4 w-4" />
+              复制 JSON 数据
+            </Button>
             <Button onClick={() => executeExport(exportFileName, isSaveAsExport)} className="bg-orange-600 hover:bg-orange-700 text-white">确认保存</Button>
           </DialogFooter>
         </DialogContent>
@@ -1555,16 +1565,7 @@ export default function App() {
                 <Save className="h-4 w-4" />
                 另存为
               </Button>
-              <Button 
-                variant="ghost" 
-                size="sm" 
-                className="gap-1.5 text-xs text-emerald-700 bg-emerald-50/80 border border-emerald-200/60 hover:bg-emerald-100 hidden lg:flex" 
-                onClick={() => setIsAuthorized(false)}
-                title="已通过授权验证，点击可重新打开授权界面或切换特征码"
-              >
-                <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
-                <span>设备已授权</span>
-              </Button>
+
             </div>
             <div className="flex items-center gap-2">
               <Button  
