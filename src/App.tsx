@@ -821,13 +821,35 @@ export default function App() {
         }
         
         if (shouldShowPicker) {
+          const saveTypes = mainMode === 'engineering' 
+            ? [
+                {
+                  description: '工程项目文件 (*.wce)',
+                  accept: {
+                    'application/octet-stream': ['.wce'],
+                    'text/plain': ['.wce']
+                  }
+                },
+                {
+                  description: 'JSON 格式 (*.json)',
+                  accept: {
+                    'application/json': ['.json']
+                  }
+                }
+              ]
+            : [
+                {
+                  description: '优化项目文件 (*.json)',
+                  accept: {
+                    'application/json': ['.json']
+                  }
+                }
+              ];
+
           handle = await (window as any).showSaveFilePicker({
             id: mainMode === 'engineering' ? 'engineering-project' : 'optimization-project',
             suggestedName,
-            types: [{
-              description: mainMode === 'engineering' ? '工程文件 (.wce)' : '优化文件 (.json)',
-              accept: { 'application/json': mainMode === 'engineering' ? ['.wce'] : ['.json'] }
-            }]
+            types: saveTypes
           });
         }
         
@@ -861,28 +883,36 @@ export default function App() {
     return result;
   };
 
-  const handleExportProject = () => {
+  const handleExportProject = async () => {
     const defaultName = getDefaultFileName(false);
 
     if ('showSaveFilePicker' in window && window.self === window.top) {
-      executeExport(defaultName, false); // Skip confirm dialog if using native save picker
-    } else {
-      setIsSaveAsExport(false);
-      setExportFileName(defaultName);
-      setConfirmExportOpen(true);
+      try {
+        const ok = await executeExport(defaultName, false);
+        if (ok) return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+      }
     }
+    setIsSaveAsExport(false);
+    setExportFileName(defaultName);
+    setConfirmExportOpen(true);
   };
 
-  const handleSaveAsProject = () => {
+  const handleSaveAsProject = async () => {
     const defaultName = getDefaultFileName(true);
 
     if ('showSaveFilePicker' in window && window.self === window.top) {
-      executeExport(defaultName, true); // Force Save As
-    } else {
-      setIsSaveAsExport(true);
-      setExportFileName(defaultName);
-      setConfirmExportOpen(true);
+      try {
+        const ok = await executeExport(defaultName, true);
+        if (ok) return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+      }
     }
+    setIsSaveAsExport(true);
+    setExportFileName(defaultName);
+    setConfirmExportOpen(true);
   };
 
   const validateAndApplyImportedData = (data: any): boolean => {
