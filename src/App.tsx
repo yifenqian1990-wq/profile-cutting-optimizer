@@ -1097,13 +1097,51 @@ export default function App() {
     }
   };
 
+  const handleDirectFileChosen = async (file: File) => {
+    const isDirty = mainMode === 'engineering' ? isEngDirty : isOptDirty;
+    const hasData = mainMode === 'engineering' 
+      ? (purchases.length > 0 || profileSales.length > 0 || savedPlans.length > 0)
+      : (demands.length > 0 || stocks.length > 0 || results !== null);
+
+    if (isDirty || hasData) {
+      setHistoryFolderOpen(false);
+      setImportPendingFile(file);
+      setConfirmImportOpen(true);
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (validateAndApplyImportedData(data)) {
+        if (mainMode === 'engineering') {
+          setCurrentProjectName(file.name.replace(/\.[^/.]+$/, ""));
+          setCurrentProjectHandle(null);
+        } else {
+          setCurrentOptimizationName(file.name.replace(/\.[^/.]+$/, ""));
+          setCurrentOptimizationHandle(null);
+        }
+        await saveToHistory(file.name, data, "", null);
+        setHistoryFolderOpen(false);
+        toast.success(mainMode === 'engineering' ? "工程文件导入成功！" : "套裁文件导入成功！");
+      }
+    } catch (err) {
+      toast.error("文件解析失败，请检查文件格式是否为有效的 JSON 格式！");
+    }
+  };
+
   const importFromLocalFile = async (startInHandle?: any) => {
     if ('showOpenFilePicker' in window && window.self === window.top) {
       const baseOptions: any = {
         types: [{
-          description: mainMode === 'engineering' ? '工程文件 (.wce)' : '优化文件 (.json)',
-          accept: { 'application/json': mainMode === 'engineering' ? ['.wce', '.json'] : ['.json'] }
-        }]
+          description: mainMode === 'engineering' ? '工程文件 (*.wce, *.json)' : '优化文件 (*.json)',
+          accept: {
+            'application/json': ['.json'],
+            'text/plain': ['.wce', '.json'],
+            'application/octet-stream': ['.wce', '.json']
+          }
+        }],
+        excludeAcceptAllOption: false
       };
 
       let handle: any = null;
@@ -1337,10 +1375,24 @@ export default function App() {
             )}
           </div>
           <DialogFooter className="flex items-center gap-2 mt-4">
-             <Button variant="outline" className="flex-1" onClick={() => setHistoryFolderOpen(false)}>取消</Button>
-             <Button className="flex-1 bg-orange-600 hover:bg-orange-700" onClick={() => importFromLocalFile()}>
-               从本地文件导入
-             </Button>
+            <Button variant="outline" className="flex-1" onClick={() => setHistoryFolderOpen(false)}>取消</Button>
+            <div className="flex-1 relative">
+              <input
+                type="file"
+                accept={mainMode === 'engineering' ? '.wce,.json' : '.json'}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  handleDirectFileChosen(file);
+                  e.target.value = '';
+                }}
+                title="选择本地文件导入"
+              />
+              <Button className="w-full bg-orange-600 hover:bg-orange-700 text-white pointer-events-none">
+                从本地文件导入
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
