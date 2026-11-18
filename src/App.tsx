@@ -323,6 +323,50 @@ export default function App() {
     }
   }, [settingsLoaded]);
 
+  // 页面加载后自动从 IndexedDB 历史记录中恢复最近一次的文件句柄（无感保存闭环关键步骤）
+  React.useEffect(() => {
+    if (!settingsLoaded) return;
+    const restoreHandle = async () => {
+      try {
+        const engKey = 'wire-optimizer-engineering-history';
+        const optKey = 'wire-optimizer-optimization-history';
+        // 恢复工程模式句柄
+        const engHistory = await get(engKey);
+        if (Array.isArray(engHistory)) {
+          const latest = engHistory.find((item: any) => item?.handle);
+          if (latest?.handle) {
+            try {
+              // 仅检查句柄有效性，不主动弹授权窗口
+              const perm = await latest.handle.queryPermission?.({ mode: 'readwrite' });
+              if (perm === 'granted' || perm === 'prompt') {
+                setCurrentProjectHandle(latest.handle);
+                setCurrentProjectName(latest.name.replace(/\.[^/.]+$/, ''));
+              }
+            } catch (_) {}
+          }
+        }
+
+        // 恢复套裁优化模式句柄
+        const optHistory = await get(optKey);
+        if (Array.isArray(optHistory)) {
+          const latest = optHistory.find((item: any) => item?.handle);
+          if (latest?.handle) {
+            try {
+              const perm = await latest.handle.queryPermission?.({ mode: 'readwrite' });
+              if (perm === 'granted' || perm === 'prompt') {
+                setCurrentOptimizationHandle(latest.handle);
+                setCurrentOptimizationName(latest.name.replace(/\.[^/.]+$/, ''));
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (e) {
+        // 恢复失败静默忽略，不影响正常使用
+      }
+    };
+    restoreHandle();
+  }, [settingsLoaded]);
+
   // Derive unique models from demands
   const uniqueModels = useMemo(() => {
     return Array.from(new Set(demands.map(d => d.model))).sort();
