@@ -1645,26 +1645,20 @@ export default function App() {
                <ClipboardPaste className="h-4 w-4" />
                {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
              </Button>
-             {canUseNativeFilePicker ? (
-               <Button className="flex-1 bg-orange-600 hover:bg-orange-700" onClick={() => importFromLocalFile()}>
+             <div className="relative flex-1 overflow-hidden rounded-md">
+               <Button type="button" className="w-full bg-orange-600 hover:bg-orange-700 pointer-events-none">
                  从本地文件导入
                </Button>
-             ) : (
-               <div className="relative flex-1 overflow-hidden rounded-md">
-                 <Button type="button" className="w-full bg-orange-600 hover:bg-orange-700 pointer-events-none">
-                   从本地文件导入
-                 </Button>
-                 <input
-                   type="file"
-                   accept=".json,.wce,application/json"
-                   className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                   onChange={(e) => {
-                     handleImportProjectMain(e);
-                     e.target.value = '';
-                   }}
-                 />
-               </div>
-             )}
+               <input
+                 type="file"
+                 accept=".wce,.json,application/json"
+                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                 onChange={(e) => {
+                   handleImportProjectMain(e);
+                   e.target.value = '';
+                 }}
+               />
+             </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
