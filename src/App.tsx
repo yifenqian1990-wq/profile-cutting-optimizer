@@ -32,7 +32,8 @@ import {
   ShieldCheck,
   Copy,
   ClipboardPaste,
-  AlertTriangle
+  AlertTriangle,
+  History
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "@/lib/utils";
@@ -1316,16 +1317,19 @@ export default function App() {
         try {
           const handle = item.handle;
           let file: any = null;
-          try {
-            // 优先直接读取，避免因为权限查询丢失激活手势
-            file = await handle.getFile();
-          } catch (fileErr) {
-            if (handle.requestPermission) {
-              const permission = await handle.requestPermission({ mode: 'read' });
-              if (permission === 'granted') {
+          // 若处于跨会话或权限未激活状态，在用户点击历史记录项的手势流中直接申请读写权限
+          if (handle.requestPermission) {
+            try {
+              const perm = await handle.requestPermission({ mode: 'readwrite' });
+              if (perm === 'granted') {
                 file = await handle.getFile();
               }
+            } catch (pErr) {
+              console.warn("主动请求读写权限失败，降级为常规读取:", pErr);
             }
+          }
+          if (!file) {
+            file = await handle.getFile();
           }
 
           if (file) {
@@ -1341,7 +1345,7 @@ export default function App() {
                 setCurrentOptimizationHandle(handle);
                 setSavedOptRev(optRev);
               }
-              toast.success(mainMode === 'engineering' ? `已载入工程并关联原文件：${handle.name}` : `已载入套裁并关联原文件：${handle.name}`);
+              toast.success(mainMode === 'engineering' ? `已载入工程并激活本地文件句柄：${handle.name}` : `已载入套裁并激活本地文件句柄：${handle.name}`);
               setHistoryFolderOpen(false);
               return;
             }
@@ -1353,7 +1357,7 @@ export default function App() {
 
       if (item.data) {
         if (applyCachedDataFallback()) {
-          toast.info(mainMode === 'engineering' ? "已加载工程缓存数据，可点击【导出】直接下载为本地文件" : "已加载套裁缓存数据，可点击【导出】直接下载为本地文件");
+          toast.info(mainMode === 'engineering' ? "已加载工程缓存数据，可点击【保存】重新选择本地文件关联" : "已加载套裁缓存数据，可点击【保存】重新选择本地文件关联");
           setHistoryFolderOpen(false);
           return;
         }
@@ -1364,30 +1368,41 @@ export default function App() {
     }
   };
 
-  const importFromLocalFile = async (startInHandle?: any) => {
+  const openLocalProjectWithHandle = async (startInHandle?: any) => {
     if (startInHandle) {
       try {
         const handle = startInHandle;
-        const file = await handle.getFile();
-        const text = await file.text();
-        const data = JSON.parse(text);
-        if (validateAndApplyImportedData(data)) {
-          if (mainMode === 'engineering') {
-            setCurrentProjectName(handle.name.replace(/\.[^/.]+$/, ""));
-            setCurrentProjectHandle(handle);
-            setSavedEngRev(engRev);
-          } else {
-            setCurrentOptimizationName(handle.name.replace(/\.[^/.]+$/, ""));
-            setCurrentOptimizationHandle(handle);
-            setSavedOptRev(optRev);
+        let file = null;
+        if (handle.requestPermission) {
+          const perm = await handle.requestPermission({ mode: 'readwrite' });
+          if (perm === 'granted') {
+            file = await handle.getFile();
           }
-          await saveToHistory(handle.name, data, "", handle);
-          setHistoryFolderOpen(false);
-          toast.success("本地文件导入成功，已关联原文件！");
+        } else {
+          file = await handle.getFile();
         }
-        return;
+        if (file) {
+          const text = await file.text();
+          const data = JSON.parse(text);
+          if (validateAndApplyImportedData(data)) {
+            const cleanName = handle.name.replace(/\.[^/.]+$/, "");
+            if (mainMode === 'engineering') {
+              setCurrentProjectName(cleanName);
+              setCurrentProjectHandle(handle);
+              setSavedEngRev(engRev);
+            } else {
+              setCurrentOptimizationName(cleanName);
+              setCurrentOptimizationHandle(handle);
+              setSavedOptRev(optRev);
+            }
+            await saveToHistory(handle.name, data, "", handle);
+            setHistoryFolderOpen(false);
+            toast.success(`本地文件【${handle.name}】已成功打开并关联句柄！`);
+            return;
+          }
+        }
       } catch (e) {
-        // Fallback to picker / file input
+        // Fallback to picker
       }
     }
 
@@ -1407,22 +1422,41 @@ export default function App() {
         };
         const [handle] = await (window as any).showOpenFilePicker(baseOptions);
         if (handle) {
-          const file = await handle.getFile();
-          const text = await file.text();
-          const data = JSON.parse(text);
-          if (validateAndApplyImportedData(data)) {
-            if (mainMode === 'engineering') {
-              setCurrentProjectName(handle.name.replace(/\.[^/.]+$/, ""));
-              setCurrentProjectHandle(handle);
-              setSavedEngRev(engRev);
+          let file = null;
+          try {
+            if (handle.requestPermission) {
+              const perm = await handle.requestPermission({ mode: 'readwrite' });
+              if (perm === 'granted') {
+                file = await handle.getFile();
+              }
             } else {
-              setCurrentOptimizationName(handle.name.replace(/\.[^/.]+$/, ""));
-              setCurrentOptimizationHandle(handle);
-              setSavedOptRev(optRev);
+              file = await handle.getFile();
             }
-            await saveToHistory(handle.name, data, "", handle);
-            setHistoryFolderOpen(false);
-            toast.success(mainMode === 'engineering' ? `工程文件【${handle.name}】导入成功并关联！` : `套裁文件【${handle.name}】导入成功并关联！`);
+          } catch (pErr) {
+            file = await handle.getFile();
+          }
+
+          if (file) {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            if (validateAndApplyImportedData(data)) {
+              const cleanName = handle.name.replace(/\.[^/.]+$/, "");
+              if (mainMode === 'engineering') {
+                setCurrentProjectName(cleanName);
+                setCurrentProjectHandle(handle);
+                setSavedEngRev(engRev);
+              } else {
+                setCurrentOptimizationName(cleanName);
+                setCurrentOptimizationHandle(handle);
+                setSavedOptRev(optRev);
+              }
+              await saveToHistory(handle.name, data, "", handle);
+              setHistoryFolderOpen(false);
+              toast.success(mainMode === 'engineering' 
+                ? `工程文件【${handle.name}】已成功打开并关联本地文件！后续修改点击【保存工程】将静默覆写！` 
+                : `套裁文件【${handle.name}】已成功打开并关联本地文件！后续修改点击【保存套裁】将静默覆写！`
+              );
+            }
           }
           return;
         }
@@ -1430,13 +1464,14 @@ export default function App() {
         if (err?.name === 'AbortError') {
           return;
         }
-        console.warn("showOpenFilePicker 失败:", err);
-        toast.warning("浏览器文件选择器受阻，请直接将文件拖入此窗口导入");
+        console.warn("showOpenFilePicker 失败，转入备用文件输入:", err);
       }
     }
 
     triggerFallbackFileInput();
   };
+
+  const importFromLocalFile = openLocalProjectWithHandle;
 
   const handleDeletePlan = useCallback((planId: string, revokeRelated: boolean) => {
     const plan = savedPlans.find(p => p.id === planId);
@@ -1703,21 +1738,31 @@ export default function App() {
              <Button variant="outline" onClick={() => setHistoryFolderOpen(false)}>取消</Button>
              <Button variant="outline" className="gap-1.5" onClick={() => setPasteImportOpen(prev => !prev)}>
                <ClipboardPaste className="h-4 w-4" />
-               {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
+               {pasteImportOpen ? '查看历史' : '粘贴 JSON'}
              </Button>
-             <label className="flex-1 inline-flex items-center justify-center px-4 py-2 bg-orange-600 hover:bg-orange-700 active:bg-orange-800 text-white font-medium text-sm rounded-md cursor-pointer transition-colors shadow-sm select-none">
-               <Upload className="h-4 w-4 mr-2" />
-               从本地文件导入
-               <input
-                 type="file"
-                 accept=".wce,.json,application/json"
-                 className="hidden"
-                 onChange={(e) => {
-                   handleImportProjectMain(e);
-                   e.target.value = '';
-                 }}
-               />
-             </label>
+             {canUseNativeFilePicker ? (
+               <Button 
+                 className="flex-1 bg-orange-600 hover:bg-orange-700 text-white gap-2 font-medium"
+                 onClick={() => openLocalProjectWithHandle()}
+               >
+                 <FolderOpen className="h-4 w-4" />
+                 打开电脑本地文件 (建立句柄)
+               </Button>
+             ) : (
+               <label className="flex-1 inline-flex items-center justify-center px-4 py-2 bg-orange-600 hover:bg-orange-700 active:bg-orange-800 text-white font-medium text-sm rounded-md cursor-pointer transition-colors shadow-sm select-none gap-2">
+                 <Upload className="h-4 w-4" />
+                 导入本地文件数据
+                 <input
+                   type="file"
+                   accept=".wce,.json,application/json"
+                   className="hidden"
+                   onChange={(e) => {
+                     handleImportProjectMain(e);
+                     e.target.value = '';
+                   }}
+                 />
+               </label>
+             )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1813,18 +1858,42 @@ export default function App() {
               <h1 className="text-xl font-bold tracking-tight flex items-center">
                 型材优化销料管理系统
                 {currentProjectName && (
-                  <span className="relative ml-3 mr-2 text-sm font-normal text-black/60 bg-black/5 px-2 py-1 rounded align-middle flex items-center gap-1">
-                    <FolderOpen className="h-3 w-3" />{currentProjectName}
+                  <span 
+                    className="relative ml-3 mr-2 text-sm font-normal text-black/70 bg-black/5 px-2 py-1 rounded align-middle flex items-center gap-1.5 cursor-help"
+                    title={currentProjectHandle ? `已关联本地文件：${currentProjectName}.wce (点击保存工程将直接静默覆写该文件)` : `未关联本地文件（当前为浏览器内存缓存，点击保存工程将选择保存位置）`}
+                  >
+                    <FolderOpen className="h-3.5 w-3.5 text-black/60" />
+                    <span>{currentProjectName}</span>
+                    {currentProjectHandle ? (
+                      <span className="flex h-2 w-2 relative" title="已成功绑定本地文件句柄 (可静默覆写)">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                      </span>
+                    ) : (
+                      <span className="inline-block h-2 w-2 rounded-full bg-amber-400" title="未绑定本地文件句柄 (纯缓存模式)" />
+                    )}
                     {!isEngDirty && (
-                      <Check className="h-4 w-4 text-green-500 absolute -bottom-1.5 -right-1.5 bg-[#F5F5F4] rounded-full p-[1px] shadow-sm" strokeWidth={4} />
+                      <Check className="h-3.5 w-3.5 text-green-500 ml-0.5" strokeWidth={3} />
                     )}
                   </span>
                 )}
                 {currentOptimizationName && (
-                  <span className="relative ml-1 text-sm font-normal text-orange-700 bg-orange-100 px-2 py-1 rounded align-middle flex items-center gap-1">
-                    <FileText className="h-3 w-3" />{currentOptimizationName}
+                  <span 
+                    className="relative ml-1 text-sm font-normal text-orange-700 bg-orange-100 px-2 py-1 rounded align-middle flex items-center gap-1.5 cursor-help"
+                    title={currentOptimizationHandle ? `已关联本地文件：${currentOptimizationName}.json (点击保存套裁将直接静默覆写该文件)` : `未关联本地文件（当前为浏览器内存缓存，点击保存套裁将选择保存位置）`}
+                  >
+                    <FileText className="h-3.5 w-3.5 text-orange-600" />
+                    <span>{currentOptimizationName}</span>
+                    {currentOptimizationHandle ? (
+                      <span className="flex h-2 w-2 relative" title="已成功绑定本地文件句柄 (可静默覆写)">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                      </span>
+                    ) : (
+                      <span className="inline-block h-2 w-2 rounded-full bg-amber-400" title="未绑定本地文件句柄 (纯缓存模式)" />
+                    )}
                     {!isOptDirty && (
-                      <Check className="h-4 w-4 text-green-500 absolute -bottom-1.5 -right-1.5 bg-[#F5F5F4] rounded-full p-[1px] shadow-sm" strokeWidth={4} />
+                      <Check className="h-3.5 w-3.5 text-green-500 ml-0.5" strokeWidth={3} />
                     )}
                   </span>
                 )}
@@ -1848,11 +1917,21 @@ export default function App() {
                 <Plus className="h-4 w-4" />
                 {mainMode === 'engineering' ? '新建工程' : '新建套裁'}
               </Button>
-              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={() => handleImportProjectMain()}>
-                <Upload className="h-4 w-4" />
-                {mainMode === 'engineering' ? '导入工程' : '导入套裁'}
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                className="gap-2 text-black/70 hover:text-orange-600 font-medium" 
+                onClick={() => openLocalProjectWithHandle()}
+                title={mainMode === 'engineering' ? "从本地电脑打开工程文件（建立文件句柄，后续修改将无感静默覆写）" : "从本地电脑打开套裁文件（建立文件句柄，后续修改将无感静默覆写）"}
+              >
+                <FolderOpen className="h-4 w-4 text-orange-600" />
+                {mainMode === 'engineering' ? '打开工程' : '打开套裁'}
               </Button>
-              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleExportProject} title={mainMode === 'engineering' ? "快速保存工程（若已关联原文件则静默覆写）" : "快速保存套裁（若已关联原文件则静默覆写）"}>
+              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={() => handleImportProjectMain()} title="查看浏览器本地缓存历史记录">
+                <History className="h-4 w-4" />
+                工程历史
+              </Button>
+              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleExportProject} title={mainMode === 'engineering' ? "快速保存工程（若已关联本地文件则静默覆写）" : "快速保存套裁（若已关联本地文件则静默覆写）"}>
                 <Save className="h-4 w-4" />
                 {mainMode === 'engineering' ? '保存工程' : '保存套裁'}
               </Button>
@@ -1860,7 +1939,7 @@ export default function App() {
                 <Download className="h-4 w-4" />
                 {mainMode === 'engineering' ? '导出工程' : '导出套裁'}
               </Button>
-              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleSaveAsProject} title="另存为新文件">
+              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleSaveAsProject} title="另存为新文件并切换句柄">
                 <FileText className="h-4 w-4" />
                 另存为
               </Button>
