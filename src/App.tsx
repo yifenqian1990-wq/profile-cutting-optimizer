@@ -1334,13 +1334,14 @@ export default function App() {
     if (canUseNativeFilePicker) {
       try {
         const baseOptions: any = {
-          types: [{
-            description: mainMode === 'engineering' ? '工程文件 (*.wce, *.json)' : '优化文件 (*.json)',
-            accept: {
-              'application/json': ['.json', '.wce'],
-              'application/octet-stream': ['.wce']
+          types: [
+            {
+              description: mainMode === 'engineering' ? '型材工程文件 (*.wce, *.json)' : '型材套裁优化文件 (*.json)',
+              accept: {
+                'application/json': mainMode === 'engineering' ? ['.wce', '.json'] : ['.json']
+              }
             }
-          }],
+          ],
           excludeAcceptAllOption: false,
           multiple: false
         };
@@ -1361,7 +1362,7 @@ export default function App() {
             }
             await saveToHistory(handle.name, data, "", handle);
             setHistoryFolderOpen(false);
-            toast.success("本地文件导入成功，已关联原文件！");
+            toast.success(mainMode === 'engineering' ? `工程文件【${handle.name}】导入成功并关联！` : `套裁文件【${handle.name}】导入成功并关联！`);
           }
           return;
         }
@@ -1369,7 +1370,8 @@ export default function App() {
         if (err?.name === 'AbortError') {
           return;
         }
-        console.warn("showOpenFilePicker 失败，回退到原生文件选择:", err);
+        console.warn("showOpenFilePicker 失败:", err);
+        toast.warning("浏览器文件选择器受阻，请直接将文件拖入此窗口导入");
       }
     }
 
