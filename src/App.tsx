@@ -953,40 +953,55 @@ export default function App() {
 
   const handleExportProject = async () => {
     const handle = mainMode === 'engineering' ? currentProjectHandle : currentOptimizationHandle;
+    
+    // 分支 1：如果已有文件关联句柄，执行【静默无感覆写】
     if (handle) {
       try {
-        if (handle.queryPermission) {
-          const perm = await handle.queryPermission({ mode: 'readwrite' });
-          if (perm !== 'granted') {
+        let writable: any = null;
+        try {
+          // 直接尝试获取写入流（若已有授权，零延迟、零询问，直接开始写入）
+          writable = await handle.createWritable();
+        } catch (permErr: any) {
+          // 若遇到权限限制，且支持 requestPermission，直接向用户请求授权
+          if (handle.requestPermission) {
             const req = await handle.requestPermission({ mode: 'readwrite' });
-            if (req !== 'granted') {
-              throw new Error("Permission denied");
+            if (req === 'granted') {
+              writable = await handle.createWritable();
+            } else {
+              toast.error("未授予写入本地文件的权限，无法静默保存");
+              return;
             }
+          } else {
+            throw permErr;
           }
         }
-        const projectData = buildCurrentProjectData();
-        const writable = await handle.createWritable();
-        await writable.write(JSON.stringify(projectData, null, 2));
-        await writable.close();
 
-        const safeName = handle.name;
-        const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
-        await saveToHistory(safeName, projectData, oldName, handle);
-        if (mainMode === 'engineering') {
-          setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
-          setSavedEngRev(engRev);
-        } else {
-          setCurrentOptimizationName(safeName.replace(/\.[^/.]+$/, ""));
-          setSavedOptRev(optRev);
+        if (writable) {
+          const projectData = buildCurrentProjectData();
+          await writable.write(JSON.stringify(projectData, null, 2));
+          await writable.close();
+
+          const safeName = handle.name;
+          const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
+          await saveToHistory(safeName, projectData, oldName, handle);
+          if (mainMode === 'engineering') {
+            setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
+            setSavedEngRev(engRev);
+          } else {
+            setCurrentOptimizationName(safeName.replace(/\.[^/.]+$/, ""));
+            setSavedOptRev(optRev);
+          }
+          toast.success(mainMode === 'engineering' ? `已静默覆写保存到：${handle.name}` : `已静默覆写保存到：${handle.name}`);
+          return;
         }
-        toast.success(mainMode === 'engineering' ? "已无感保存到原工程文件！" : "已无感保存到原套裁文件！");
-        return;
-      } catch (err) {
-        console.warn("Silent save to handle failed, falling back to dialog:", err);
+      } catch (err: any) {
+        console.error("Silent save to handle failed:", err);
+        toast.error(`静默保存原文件失败: ${err?.message || '文件可能被移动或占用'}`);
+        return; // 明确退出！绝不能自动弹出另存为窗口！
       }
     }
 
-    // 尚无关联文件句柄，若环境支持现代 File System API 则通过保存窗口关联本地文件
+    // 分支 2：尚未关联任何本地文件（全新工程/首次保存）
     if (canUseNativeFilePicker) {
       try {
         const ext = mainMode === 'engineering' ? '.wce' : '.json';
@@ -1024,7 +1039,7 @@ export default function App() {
             setCurrentOptimizationHandle(newHandle);
             setSavedOptRev(optRev);
           }
-          toast.success(mainMode === 'engineering' ? "工程文件已保存并关联！后续修改点击即可无感覆写！" : "套裁文件已保存并关联！后续修改点击即可无感覆写！");
+          toast.success(mainMode === 'engineering' ? `工程已保存并关联至 ${newHandle.name}，后续点击将静默覆写！` : `套裁已保存并关联至 ${newHandle.name}，后续点击将静默覆写！`);
           return;
         }
       } catch (saveErr: any) {
@@ -1078,7 +1093,7 @@ export default function App() {
             setCurrentOptimizationHandle(newHandle);
             setSavedOptRev(optRev);
           }
-          toast.success(mainMode === 'engineering' ? "工程已成功另存为新文件并关联！" : "套裁已成功另存为新文件并关联！");
+          toast.success(mainMode === 'engineering' ? `工程已成功另存为：${newHandle.name}` : `套裁已成功另存为：${newHandle.name}`);
           return;
         }
       } catch (saveErr: any) {
