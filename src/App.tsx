@@ -904,7 +904,41 @@ export default function App() {
     return true;
   };
 
-  const handleExportProject = () => {
+  const handleExportProject = async () => {
+    const handle = mainMode === 'engineering' ? currentProjectHandle : currentOptimizationHandle;
+    if (handle) {
+      try {
+        if (handle.queryPermission) {
+          const perm = await handle.queryPermission({ mode: 'readwrite' });
+          if (perm !== 'granted') {
+            const req = await handle.requestPermission({ mode: 'readwrite' });
+            if (req !== 'granted') {
+              throw new Error("Permission denied");
+            }
+          }
+        }
+        const projectData = buildCurrentProjectData();
+        const writable = await handle.createWritable();
+        await writable.write(JSON.stringify(projectData, null, 2));
+        await writable.close();
+
+        const safeName = handle.name;
+        const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
+        await saveToHistory(safeName, projectData, oldName, handle);
+        if (mainMode === 'engineering') {
+          setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
+          setSavedEngRev(engRev);
+        } else {
+          setCurrentOptimizationName(safeName.replace(/\.[^/.]+$/, ""));
+          setSavedOptRev(optRev);
+        }
+        toast.success(mainMode === 'engineering' ? "已无感保存到原工程文件！" : "已无感保存到原套裁文件！");
+        return;
+      } catch (err) {
+        console.warn("Silent save to handle failed, falling back to dialog:", err);
+      }
+    }
+
     const defaultName = getDefaultFileName(false);
     setIsSaveAsExport(false);
     setExportFileName(defaultName);
@@ -912,6 +946,11 @@ export default function App() {
   };
 
   const handleSaveAsProject = () => {
+    if (mainMode === 'engineering') {
+      setCurrentProjectHandle(null);
+    } else {
+      setCurrentOptimizationHandle(null);
+    }
     const defaultName = getDefaultFileName(true);
     setIsSaveAsExport(true);
     setExportFileName(defaultName);
