@@ -629,7 +629,10 @@ export default function App() {
   const [pasteImportText, setPasteImportText] = useState("");
 
   const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
-  const canUseNativeFilePicker = false;
+  const canUseNativeFilePicker = typeof window !== 'undefined' && 
+    !isInIframe && 
+    'showOpenFilePicker' in window && 
+    'showSaveFilePicker' in window;
 
   const sanitizeFileName = (name: string) => {
     return name.replace(/[\\/:*?"<>|\r\n]+/g, "_").trim();
@@ -939,13 +942,109 @@ export default function App() {
       }
     }
 
+    // 尚无关联文件句柄，若环境支持现代 File System API 则通过保存窗口关联本地文件
+    if (canUseNativeFilePicker) {
+      try {
+        const ext = mainMode === 'engineering' ? '.wce' : '.json';
+        const suggestedName = ensureFileExtension(getDefaultFileName(false), ext);
+        const saveTypes = mainMode === 'engineering' ? [
+          {
+            description: '型材工程文件 (*.wce)',
+            accept: { 'application/octet-stream': ['.wce'], 'application/json': ['.json'] }
+          }
+        ] : [
+          {
+            description: '型材套裁文件 (*.json)',
+            accept: { 'application/json': ['.json'] }
+          }
+        ];
+        const newHandle = await (window as any).showSaveFilePicker({
+          suggestedName,
+          types: saveTypes
+        });
+        if (newHandle) {
+          const projectData = buildCurrentProjectData();
+          const writable = await newHandle.createWritable();
+          await writable.write(JSON.stringify(projectData, null, 2));
+          await writable.close();
+
+          const safeName = newHandle.name;
+          const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
+          await saveToHistory(safeName, projectData, oldName, newHandle);
+          if (mainMode === 'engineering') {
+            setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
+            setCurrentProjectHandle(newHandle);
+            setSavedEngRev(engRev);
+          } else {
+            setCurrentOptimizationName(safeName.replace(/\.[^/.]+$/, ""));
+            setCurrentOptimizationHandle(newHandle);
+            setSavedOptRev(optRev);
+          }
+          toast.success(mainMode === 'engineering' ? "工程文件已保存并关联！后续修改点击即可无感覆写！" : "套裁文件已保存并关联！后续修改点击即可无感覆写！");
+          return;
+        }
+      } catch (saveErr: any) {
+        if (saveErr?.name === 'AbortError') {
+          return;
+        }
+        console.warn("showSaveFilePicker 失败，回退到下载弹窗:", saveErr);
+      }
+    }
+
     const defaultName = getDefaultFileName(false);
     setIsSaveAsExport(false);
     setExportFileName(defaultName);
     setConfirmExportOpen(true);
   };
 
-  const handleSaveAsProject = () => {
+  const handleSaveAsProject = async () => {
+    if (canUseNativeFilePicker) {
+      try {
+        const ext = mainMode === 'engineering' ? '.wce' : '.json';
+        const suggestedName = ensureFileExtension(getDefaultFileName(true), ext);
+        const saveTypes = mainMode === 'engineering' ? [
+          {
+            description: '型材工程文件 (*.wce)',
+            accept: { 'application/octet-stream': ['.wce'], 'application/json': ['.json'] }
+          }
+        ] : [
+          {
+            description: '型材套裁文件 (*.json)',
+            accept: { 'application/json': ['.json'] }
+          }
+        ];
+        const newHandle = await (window as any).showSaveFilePicker({
+          suggestedName,
+          types: saveTypes
+        });
+        if (newHandle) {
+          const projectData = buildCurrentProjectData();
+          const writable = await newHandle.createWritable();
+          await writable.write(JSON.stringify(projectData, null, 2));
+          await writable.close();
+
+          const safeName = newHandle.name;
+          await saveToHistory(safeName, projectData, "", newHandle);
+          if (mainMode === 'engineering') {
+            setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
+            setCurrentProjectHandle(newHandle);
+            setSavedEngRev(engRev);
+          } else {
+            setCurrentOptimizationName(safeName.replace(/\.[^/.]+$/, ""));
+            setCurrentOptimizationHandle(newHandle);
+            setSavedOptRev(optRev);
+          }
+          toast.success(mainMode === 'engineering' ? "工程已成功另存为新文件并关联！" : "套裁已成功另存为新文件并关联！");
+          return;
+        }
+      } catch (saveErr: any) {
+        if (saveErr?.name === 'AbortError') {
+          return;
+        }
+        console.warn("showSaveFilePicker 另存为失败，回退到下载弹窗:", saveErr);
+      }
+    }
+
     if (mainMode === 'engineering') {
       setCurrentProjectHandle(null);
     } else {
@@ -1180,19 +1279,64 @@ export default function App() {
           if (mainMode === 'engineering') {
             setCurrentProjectName(handle.name.replace(/\.[^/.]+$/, ""));
             setCurrentProjectHandle(handle);
+            setSavedEngRev(engRev);
           } else {
             setCurrentOptimizationName(handle.name.replace(/\.[^/.]+$/, ""));
             setCurrentOptimizationHandle(handle);
+            setSavedOptRev(optRev);
           }
           await saveToHistory(handle.name, data, "", handle);
           setHistoryFolderOpen(false);
-          toast.success("本地文件导入成功！");
+          toast.success("本地文件导入成功，已关联原文件！");
         }
         return;
       } catch (e) {
-        // Fallback to file input
+        // Fallback to picker / file input
       }
     }
+
+    if (canUseNativeFilePicker) {
+      try {
+        const baseOptions: any = {
+          types: [{
+            description: mainMode === 'engineering' ? '工程文件 (*.wce, *.json)' : '优化文件 (*.json)',
+            accept: {
+              'application/json': ['.json', '.wce'],
+              'application/octet-stream': ['.wce']
+            }
+          }],
+          excludeAcceptAllOption: false,
+          multiple: false
+        };
+        const [handle] = await (window as any).showOpenFilePicker(baseOptions);
+        if (handle) {
+          const file = await handle.getFile();
+          const text = await file.text();
+          const data = JSON.parse(text);
+          if (validateAndApplyImportedData(data)) {
+            if (mainMode === 'engineering') {
+              setCurrentProjectName(handle.name.replace(/\.[^/.]+$/, ""));
+              setCurrentProjectHandle(handle);
+              setSavedEngRev(engRev);
+            } else {
+              setCurrentOptimizationName(handle.name.replace(/\.[^/.]+$/, ""));
+              setCurrentOptimizationHandle(handle);
+              setSavedOptRev(optRev);
+            }
+            await saveToHistory(handle.name, data, "", handle);
+            setHistoryFolderOpen(false);
+            toast.success("本地文件导入成功，已关联原文件！");
+          }
+          return;
+        }
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
+        console.warn("showOpenFilePicker 失败，回退到原生文件选择:", err);
+      }
+    }
+
     triggerFallbackFileInput();
   };
 
