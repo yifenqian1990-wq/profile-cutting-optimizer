@@ -951,6 +951,25 @@ export default function App() {
     return true;
   };
 
+  const downloadRecordToLocal = (item: any) => {
+    if (!item || !item.data) {
+      toast.error("该记录暂无可用数据");
+      return;
+    }
+    const ext = mainMode === 'engineering' ? '.wce' : '.json';
+    const safeName = ensureFileExtension(item.name || (mainMode === 'engineering' ? '工程项目' : '优化项目'), ext);
+    const blob = new Blob([JSON.stringify(item.data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = safeName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast.success(mainMode === 'engineering' ? `已将工程【${safeName}】下载到本地电脑！` : `已将套裁【${safeName}】下载到本地电脑！`);
+  };
+
   const handleExportProject = async () => {
     const handle = mainMode === 'engineering' ? currentProjectHandle : currentOptimizationHandle;
     
@@ -1280,50 +1299,52 @@ export default function App() {
       if (item.handle) {
         try {
           const handle = item.handle;
-          if ((await handle.queryPermission({ mode: 'read' })) !== 'granted') {
-            const permission = await handle.requestPermission({ mode: 'read' });
-            if (permission !== 'granted') {
-              if (applyCachedDataFallback()) {
-                toast.info("未授予原文件访问权限，已加载本地缓存副本");
-                setHistoryFolderOpen(false);
-                return;
+          let file: any = null;
+          try {
+            // 优先直接读取，避免因为权限查询丢失激活手势
+            file = await handle.getFile();
+          } catch (fileErr) {
+            if (handle.requestPermission) {
+              const permission = await handle.requestPermission({ mode: 'read' });
+              if (permission === 'granted') {
+                file = await handle.getFile();
               }
-              toast.error("拒绝访问文件。");
+            }
+          }
+
+          if (file) {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            if (validateAndApplyImportedData(data)) {
+              if (mainMode === 'engineering') {
+                setCurrentProjectName(item.name.replace(/\.[^/.]+$/, ""));
+                setCurrentProjectHandle(handle);
+                setSavedEngRev(engRev);
+              } else {
+                setCurrentOptimizationName(item.name.replace(/\.[^/.]+$/, ""));
+                setCurrentOptimizationHandle(handle);
+                setSavedOptRev(optRev);
+              }
+              toast.success(mainMode === 'engineering' ? `已载入工程并关联原文件：${handle.name}` : `已载入套裁并关联原文件：${handle.name}`);
+              setHistoryFolderOpen(false);
               return;
             }
           }
-          const file = await handle.getFile();
-          const text = await file.text();
-          const data = JSON.parse(text);
-          if (validateAndApplyImportedData(data)) {
-            if (mainMode === 'engineering') {
-              setCurrentProjectName(item.name.replace(/\.[^/.]+$/, ""));
-              setCurrentProjectHandle(handle);
-            } else {
-              setCurrentOptimizationName(item.name.replace(/\.[^/.]+$/, ""));
-              setCurrentOptimizationHandle(handle);
-            }
-            toast.success("已加载最新的本地文件内容");
-            setHistoryFolderOpen(false);
-          }
-          return;
         } catch (handleErr) {
-          if (applyCachedDataFallback()) {
-            toast.info("原本地文件不可访问，已加载本地缓存数据");
-            setHistoryFolderOpen(false);
-            return;
-          }
-          throw handleErr;
+          console.warn("加载本地句柄失败，转为加载缓存:", handleErr);
         }
-      } else if (item.data) {
+      }
+
+      if (item.data) {
         if (applyCachedDataFallback()) {
-          toast.success(mainMode === 'engineering' ? "已加载缓存的工程数据" : "已加载缓存的套裁数据");
+          toast.info(mainMode === 'engineering' ? "已加载工程缓存数据，可点击【导出】直接下载为本地文件" : "已加载套裁缓存数据，可点击【导出】直接下载为本地文件");
           setHistoryFolderOpen(false);
+          return;
         }
       }
     } catch (e) {
       console.error(e);
-      toast.error("读取文件失败，文件可能已被移动或删除。");
+      toast.error("读取文件失败，数据可能损坏。");
     }
   };
 
@@ -1592,6 +1613,27 @@ export default function App() {
                       <div className="font-semibold flex items-center justify-between w-full gap-2">
                         <span className="truncate">{item.name}</span>
                         <div className="flex items-center gap-1 flex-shrink-0">
+                          {item.data && (
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              className="text-black/40 hover:text-green-600 p-1 cursor-pointer"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                downloadRecordToLocal(item);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  downloadRecordToLocal(item);
+                                }
+                              }}
+                              title="直接将此缓存数据下载为电脑本地文件"
+                            >
+                              <Download className="h-4 w-4" />
+                            </span>
+                          )}
                           {item.handle && canUseNativeFilePicker && (
                             <span
                               role="button"
@@ -1799,12 +1841,16 @@ export default function App() {
                 <Upload className="h-4 w-4" />
                 {mainMode === 'engineering' ? '导入工程' : '导入套裁'}
               </Button>
-              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleExportProject}>
+              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleExportProject} title={mainMode === 'engineering' ? "快速保存工程（若已关联原文件则静默覆写）" : "快速保存套裁（若已关联原文件则静默覆写）"}>
                 <Save className="h-4 w-4" />
                 {mainMode === 'engineering' ? '保存工程' : '保存套裁'}
               </Button>
-              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleSaveAsProject}>
-                <Save className="h-4 w-4" />
+              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={() => executeExport(undefined, false)} title={mainMode === 'engineering' ? "直接将当前工程数据下载为本地文件 (.wce)" : "直接将当前套裁数据下载为本地文件 (.json)"}>
+                <Download className="h-4 w-4" />
+                {mainMode === 'engineering' ? '导出工程' : '导出套裁'}
+              </Button>
+              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleSaveAsProject} title="另存为新文件">
+                <FileText className="h-4 w-4" />
                 另存为
               </Button>
 
