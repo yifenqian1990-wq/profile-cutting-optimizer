@@ -926,49 +926,57 @@ export default function App() {
     toast.success(mainMode === 'engineering' ? `已将工程【${safeName}】下载到本地电脑！` : `已将套裁【${safeName}】下载到本地电脑！`);
   };
 
+  const writeToFileHandle = async (handle: any, data: any): Promise<boolean> => {
+    const jsonStr = JSON.stringify(data, null, 2);
+    let lastError: any = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const writable = await handle.createWritable();
+        await writable.write(jsonStr);
+        await writable.close();
+        return true;
+      } catch (err: any) {
+        lastError = err;
+        if (handle.requestPermission && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+          try {
+            const req = await handle.requestPermission({ mode: 'readwrite' });
+            if (req === 'granted') {
+              const writable = await handle.createWritable();
+              await writable.write(jsonStr);
+              await writable.close();
+              return true;
+            }
+          } catch (permErr) {
+            lastError = permErr;
+          }
+        }
+        await new Promise(r => setTimeout(r, 120));
+      }
+    }
+    throw lastError;
+  };
+
   const handleExportProject = async () => {
     const handle = mainMode === 'engineering' ? currentProjectHandle : currentOptimizationHandle;
     
     // 分支 1：如果已有文件关联句柄，执行【静默无感覆写】
     if (handle) {
       try {
-        let writable: any = null;
-        try {
-          // 直接尝试获取写入流（若已有授权，零延迟、零询问，直接开始写入）
-          writable = await handle.createWritable();
-        } catch (permErr: any) {
-          // 若遇到权限限制，且支持 requestPermission，直接向用户请求授权
-          if (handle.requestPermission) {
-            const req = await handle.requestPermission({ mode: 'readwrite' });
-            if (req === 'granted') {
-              writable = await handle.createWritable();
-            } else {
-              toast.error("未授予写入本地文件的权限，无法静默保存");
-              return;
-            }
-          } else {
-            throw permErr;
-          }
-        }
+        const projectData = buildCurrentProjectData();
+        await writeToFileHandle(handle, projectData);
 
-        if (writable) {
-          const projectData = buildCurrentProjectData();
-          await writable.write(JSON.stringify(projectData, null, 2));
-          await writable.close();
-
-          const safeName = handle.name;
-          const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
-          await saveToHistory(safeName, projectData, oldName, handle);
-          if (mainMode === 'engineering') {
-            setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
-            setSavedEngRev(engRev);
-          } else {
-            setCurrentOptimizationName(safeName.replace(/\.[^/.]+$/, ""));
-            setSavedOptRev(optRev);
-          }
-          toast.success(mainMode === 'engineering' ? `已静默覆写保存到：${handle.name}` : `已静默覆写保存到：${handle.name}`);
-          return;
+        const safeName = handle.name;
+        const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
+        await saveToHistory(safeName, projectData, oldName, handle);
+        if (mainMode === 'engineering') {
+          setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
+          setSavedEngRev(engRev);
+        } else {
+          setCurrentOptimizationName(safeName.replace(/\.[^/.]+$/, ""));
+          setSavedOptRev(optRev);
         }
+        toast.success(`已静默覆写保存到：${handle.name}`);
+        return;
       } catch (err: any) {
         console.error("Silent save to handle failed:", err);
         toast.error(`静默保存原文件失败: ${err?.message || '文件可能被移动或占用'}`);
@@ -983,9 +991,9 @@ export default function App() {
         const suggestedName = ensureFileExtension(getDefaultFileName(false), ext);
         const saveTypes = [
           {
-            description: mainMode === 'engineering' ? '型材工程文件 (*.wce, *.json)' : '型材套裁文件 (*.json)',
+            description: mainMode === 'engineering' ? '型材工程文件 (*.wce)' : '型材套裁文件 (*.json)',
             accept: { 
-              'application/json': mainMode === 'engineering' ? ['.wce', '.json'] : ['.json'] 
+              'application/json': mainMode === 'engineering' ? ['.wce'] : ['.json'] 
             }
           }
         ];
@@ -996,37 +1004,40 @@ export default function App() {
         if (newHandle) {
           const safeName = newHandle.name;
           const cleanName = safeName.replace(/\.[^/.]+$/, "");
-          
-          // 1. 优先确立文件句柄与项目名称
-          if (mainMode === 'engineering') {
-            setCurrentProjectName(cleanName);
-            setCurrentProjectHandle(newHandle);
-            setSavedEngRev(engRev);
-          } else {
-            setCurrentOptimizationName(cleanName);
-            setCurrentOptimizationHandle(newHandle);
-            setSavedOptRev(optRev);
-          }
-
-          // 2. 写入文件数据
           const projectData = buildCurrentProjectData();
+
           try {
-            const writable = await newHandle.createWritable();
-            await writable.write(JSON.stringify(projectData, null, 2));
-            await writable.close();
-            toast.success(mainMode === 'engineering' ? `工程文件已成功保存到本地：${safeName}！后续修改点击即可无感覆写！` : `套裁文件已成功保存到本地：${safeName}！后续修改点击即可无感覆写！`);
+            await writeToFileHandle(newHandle, projectData);
+            
+            // 写入成功后建立句柄并绑定项目名称
+            if (mainMode === 'engineering') {
+              setCurrentProjectName(cleanName);
+              setCurrentProjectHandle(newHandle);
+              setSavedEngRev(engRev);
+            } else {
+              setCurrentOptimizationName(cleanName);
+              setCurrentOptimizationHandle(newHandle);
+              setSavedOptRev(optRev);
+            }
+            toast.success(mainMode === 'engineering' ? `工程已成功保存并关联至本地：${safeName}！后续修改点击将静默覆写！` : `套裁已成功保存并关联至本地：${safeName}！后续修改点击将静默覆写！`);
+
+            try {
+              const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
+              await saveToHistory(safeName, projectData, oldName, newHandle);
+            } catch (histErr) {
+              console.warn("历史缓存更新失败:", histErr);
+            }
           } catch (writeErr: any) {
             console.error("写入新句柄失败，触发直接下载兜底:", writeErr);
-            toast.warning(`写入文件流受阻(${writeErr.message || '权限或安全策略限制'})，已自动为您直接下载文件到电脑！`);
+            toast.warning(`写入文件流受阻(${writeErr.message || '权限限制'})，已自动为您直接下载文件到电脑！`);
+            if (mainMode === 'engineering') {
+              setCurrentProjectName(cleanName);
+              setCurrentProjectHandle(null);
+            } else {
+              setCurrentOptimizationName(cleanName);
+              setCurrentOptimizationHandle(null);
+            }
             await executeExport(safeName, false);
-          }
-
-          // 3. 异步保存到本地历史记录
-          try {
-            const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
-            await saveToHistory(safeName, projectData, oldName, newHandle);
-          } catch (histErr) {
-            console.warn("历史缓存更新失败:", histErr);
           }
 
           return;
@@ -1053,9 +1064,9 @@ export default function App() {
         const suggestedName = ensureFileExtension(getDefaultFileName(true), ext);
         const saveTypes = [
           {
-            description: mainMode === 'engineering' ? '型材工程文件 (*.wce, *.json)' : '型材套裁文件 (*.json)',
+            description: mainMode === 'engineering' ? '型材工程文件 (*.wce)' : '型材套裁文件 (*.json)',
             accept: { 
-              'application/json': mainMode === 'engineering' ? ['.wce', '.json'] : ['.json'] 
+              'application/json': mainMode === 'engineering' ? ['.wce'] : ['.json'] 
             }
           }
         ];
@@ -1066,33 +1077,37 @@ export default function App() {
         if (newHandle) {
           const safeName = newHandle.name;
           const cleanName = safeName.replace(/\.[^/.]+$/, "");
-
-          if (mainMode === 'engineering') {
-            setCurrentProjectName(cleanName);
-            setCurrentProjectHandle(newHandle);
-            setSavedEngRev(engRev);
-          } else {
-            setCurrentOptimizationName(cleanName);
-            setCurrentOptimizationHandle(newHandle);
-            setSavedOptRev(optRev);
-          }
-
           const projectData = buildCurrentProjectData();
+
           try {
-            const writable = await newHandle.createWritable();
-            await writable.write(JSON.stringify(projectData, null, 2));
-            await writable.close();
+            await writeToFileHandle(newHandle, projectData);
+            if (mainMode === 'engineering') {
+              setCurrentProjectName(cleanName);
+              setCurrentProjectHandle(newHandle);
+              setSavedEngRev(engRev);
+            } else {
+              setCurrentOptimizationName(cleanName);
+              setCurrentOptimizationHandle(newHandle);
+              setSavedOptRev(optRev);
+            }
             toast.success(mainMode === 'engineering' ? `工程已成功另存为：${safeName}！` : `套裁已成功另存为：${safeName}！`);
+
+            try {
+              await saveToHistory(safeName, projectData, "", newHandle);
+            } catch (histErr) {
+              console.warn("历史缓存更新失败:", histErr);
+            }
           } catch (writeErr: any) {
             console.error("另存为写入受阻，触发直接下载兜底:", writeErr);
             toast.warning(`写入文件流受阻，已为您直接下载文件到电脑！`);
+            if (mainMode === 'engineering') {
+              setCurrentProjectName(cleanName);
+              setCurrentProjectHandle(null);
+            } else {
+              setCurrentOptimizationName(cleanName);
+              setCurrentOptimizationHandle(null);
+            }
             await executeExport(safeName, true);
-          }
-
-          try {
-            await saveToHistory(safeName, projectData, "", newHandle);
-          } catch (histErr) {
-            console.warn("历史缓存更新失败:", histErr);
           }
 
           return;
@@ -1101,7 +1116,7 @@ export default function App() {
         if (saveErr?.name === 'AbortError') {
           return;
         }
-        console.warn("showSaveFilePicker 另存为失败，回退到下载弹窗:", saveErr);
+        console.warn("showSaveFilePicker 另存为失败，转入确认导出弹窗:", saveErr);
       }
     }
 
@@ -1167,25 +1182,29 @@ export default function App() {
     }
   };
 
-  const executeImport = () => {
-    if (!importPendingFile) return;
-    const fileName = importPendingFile.name;
+  const applyImportedFile = (file: File) => {
+    const fileName = file.name;
+    const cleanName = fileName.replace(/\.[^/.]+$/, "");
     const reader = new FileReader();
     reader.onload = async (event) => {
       try {
-        const data = JSON.parse(event.target?.result as string);
+        const text = event.target?.result as string;
+        const data = JSON.parse(text);
         if (validateAndApplyImportedData(data)) {
           if (mainMode === 'engineering') {
-            setCurrentProjectName(fileName.replace(/\.[^/.]+$/, ""));
+            setCurrentProjectName(cleanName);
             setCurrentProjectHandle(null);
+            setSavedEngRev(engRev);
           } else {
-            setCurrentOptimizationName(fileName.replace(/\.[^/.]+$/, ""));
+            setCurrentOptimizationName(cleanName);
             setCurrentOptimizationHandle(null);
+            setSavedOptRev(optRev);
           }
           await saveToHistory(fileName, data, "", null);
+          toast.success(mainMode === 'engineering' ? `工程文件【${fileName}】导入成功！` : `套裁文件【${fileName}】导入成功！`);
         }
       } catch (err) {
-        toast.error("文件解析失败，请确认文件为有效的 JSON 格式！");
+        toast.error("文件解析失败，请确认文件为有效的 JSON/WCE 格式！");
       }
       setConfirmImportOpen(false);
       setImportPendingFile(null);
@@ -1197,7 +1216,12 @@ export default function App() {
       setImportPendingFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
     };
-    reader.readAsText(importPendingFile);
+    reader.readAsText(file);
+  };
+
+  const executeImport = () => {
+    if (!importPendingFile) return;
+    applyImportedFile(importPendingFile);
   };
 
   const triggerFallbackFileInput = () => {
@@ -1212,6 +1236,16 @@ export default function App() {
       const file = e.target.files[0];
       if (!file) return;
       setHistoryFolderOpen(false);
+
+      const hasExistingData = mainMode === 'engineering'
+        ? (purchases.length > 0 || profileSales.length > 0 || savedPlans.length > 0)
+        : (demands.length > 0 || stocks.length > 0 || (results && results.length > 0));
+
+      if (!hasExistingData) {
+        applyImportedFile(file);
+        return;
+      }
+
       setImportPendingFile(file);
       setConfirmImportOpen(true);
       return;
@@ -1671,20 +1705,19 @@ export default function App() {
                <ClipboardPaste className="h-4 w-4" />
                {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
              </Button>
-             <div className="relative flex-1 overflow-hidden rounded-md">
-               <Button type="button" className="w-full bg-orange-600 hover:bg-orange-700 pointer-events-none">
-                 从本地文件导入
-               </Button>
+             <label className="flex-1 inline-flex items-center justify-center px-4 py-2 bg-orange-600 hover:bg-orange-700 active:bg-orange-800 text-white font-medium text-sm rounded-md cursor-pointer transition-colors shadow-sm select-none">
+               <Upload className="h-4 w-4 mr-2" />
+               从本地文件导入
                <input
                  type="file"
                  accept=".wce,.json,application/json"
-                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                 className="hidden"
                  onChange={(e) => {
                    handleImportProjectMain(e);
                    e.target.value = '';
                  }}
                />
-             </div>
+             </label>
           </DialogFooter>
         </DialogContent>
       </Dialog>
