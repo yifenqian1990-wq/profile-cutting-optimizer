@@ -1089,12 +1089,11 @@ export default function App() {
     try {
       const pickerOptions: any = {
         suggestedName,
-        excludeAcceptAllOption: false,
         types: [
           {
             description: desc,
             accept: isEng
-              ? { 'application/octet-stream': ['.wce'] }
+              ? { 'application/octet-stream': ['.wce'], 'application/json': ['.json'] }
               : { 'application/json': ['.json'] }
           }
         ]
@@ -1419,6 +1418,12 @@ export default function App() {
       return;
     }
     
+    // 在支持原生文件系统的电脑浏览器上，点击顶部【导入工程】直接调起文件窗口并直接形成句柄！
+    if (canUseNativeFilePicker) {
+      await openLocalProjectWithHandle();
+      return;
+    }
+
     setConfirmImportOpen(false);
     setPasteImportOpen(false);
     await loadHistoryList();
@@ -1592,7 +1597,6 @@ export default function App() {
     try {
       const pickerOptions: any = {
         multiple: false,
-        excludeAcceptAllOption: false,
         types: [{
           description: desc,
           accept: isEng
@@ -1610,14 +1614,17 @@ export default function App() {
       }
       handles = await (window as any).showOpenFilePicker(pickerOptions);
     } catch (e: any) {
-      if (e?.name === 'AbortError') return;
+      if (e?.name === 'AbortError') {
+        await loadHistoryList();
+        setHistoryFolderOpen(true);
+        return;
+      }
       console.warn("showOpenFilePicker 规范过滤失败，尝试纯净选项重试:", e);
       try {
         handles = await (window as any).showOpenFilePicker({ multiple: false });
       } catch (retryErr: any) {
-        if (retryErr?.name === 'AbortError') return;
-        console.warn("showOpenFilePicker 重试失败，降级备用 input:", retryErr);
-        triggerFallbackFileInput();
+        await loadHistoryList();
+        setHistoryFolderOpen(true);
         return;
       }
     }
