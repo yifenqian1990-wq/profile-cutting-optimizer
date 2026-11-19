@@ -1089,11 +1089,15 @@ export default function App() {
       const saveTypes = isEng ? [
         {
           description: '型材工程文件 (*.wce)',
-          accept: { 'application/octet-stream': ['.wce'], 'application/json': ['.json'] }
+          accept: { 'application/octet-stream': ['.wce'] }
+        },
+        {
+          description: 'JSON 数据文件 (*.json)',
+          accept: { 'application/json': ['.json'] }
         }
       ] : [
         {
-          description: '型材套裁文件 (*.json)',
+          description: '型材优化套裁文件 (*.json)',
           accept: { 'application/json': ['.json'] }
         }
       ];
@@ -1944,27 +1948,14 @@ export default function App() {
                    <ClipboardPaste className="h-4 w-4" />
                    {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
                  </Button>
-                 <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
+                 <Button
+                   type="button"
+                   className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium py-2 px-4 shadow-sm transition-colors text-sm"
+                   onClick={handleImportFromLocalFileInDialog}
+                 >
                    <Upload className="h-4 w-4" />
                    从本地文件导入
-                   <input
-                     type="file"
-                     accept=".wce,.json,application/json,text/plain,*/*"
-                     className="sr-only"
-                     onClick={(e) => {
-                       (e.target as HTMLInputElement).value = "";
-                     }}
-                     onChange={async (e) => {
-                       const file = e.target.files?.[0];
-                       if (!file) return;
-                       try {
-                         await queueOrExecuteImport(file, null);
-                       } finally {
-                         e.target.value = "";
-                       }
-                     }}
-                   />
-                 </label>
+                 </Button>
               </DialogFooter>
             </>
           )}
@@ -2059,28 +2050,15 @@ export default function App() {
               <h1 className="text-xl font-bold tracking-tight flex items-center">
                 型材优化销料管理系统
                 {currentProjectName && (
-                  <div className="inline-flex items-center">
-                    <span
-                      className="relative ml-3 mr-2 text-sm font-normal text-black/60 bg-black/5 px-2 py-1 rounded align-middle flex items-center gap-1"
-                      title={currentProjectHandle ? `已绑定本地文件句柄 (${currentProjectHandle.name})，再次保存将直接覆盖原文件` : '未绑定本地文件句柄（点击后方「关联本地文件」或点击「保存工程」即可直接关联）'}
-                    >
-                      <FolderOpen className="h-3 w-3" />{currentProjectName}
-                      {currentProjectHandle && !isEngDirty && (
-                        <Check className="h-4 w-4 text-green-500 absolute -bottom-1.5 -right-1.5 bg-[#F5F5F4] rounded-full p-[1px] shadow-sm" strokeWidth={4} />
-                      )}
-                    </span>
-                    {!currentProjectHandle && canUseNativeFilePicker && (
-                      <button
-                        type="button"
-                        onClick={() => openLocalProjectWithHandle()}
-                        className="text-xs font-medium text-orange-600 hover:text-white hover:bg-orange-600 bg-orange-100 border border-orange-300 px-2 py-1 rounded flex items-center gap-1 transition-all shadow-sm"
-                        title="点击直接关联本地文件，获得物理句柄并实现Ctrl+S无感覆写"
-                      >
-                        <FolderOpen className="h-3 w-3" />
-                        关联本地文件
-                      </button>
+                  <span
+                    className="relative ml-3 mr-2 text-sm font-normal text-black/60 bg-black/5 px-2 py-1 rounded align-middle flex items-center gap-1"
+                    title={currentProjectHandle ? `已绑定本地文件句柄 (${currentProjectHandle.name})，再次保存将直接覆盖原文件` : '未绑定本地文件句柄（点击「保存工程」即可直接关联）'}
+                  >
+                    <FolderOpen className="h-3 w-3" />{currentProjectName}
+                    {currentProjectHandle && !isEngDirty && (
+                      <Check className="h-4 w-4 text-green-500 absolute -bottom-1.5 -right-1.5 bg-[#F5F5F4] rounded-full p-[1px] shadow-sm" strokeWidth={4} />
                     )}
-                  </div>
+                  </span>
                 )}
                 {currentOptimizationName && (
                   <span
