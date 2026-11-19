@@ -33,7 +33,8 @@ import {
   Copy,
   ClipboardPaste,
   AlertTriangle,
-  ExternalLink
+  ExternalLink,
+  History
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "@/lib/utils";
@@ -1054,7 +1055,9 @@ export default function App() {
     isSaveAs: boolean,
     customSuggestedName?: string
   ): Promise<'saved' | 'cancelled' | 'failed' | 'downloaded'> => {
-    const ext = mainMode === 'engineering' ? '.wce' : '.json';
+    const isEng = mainMode === 'engineering';
+    const ext = isEng ? '.wce' : '.json';
+    const desc = isEng ? '型材工程文件 (*.wce)' : '型材优化套裁文件 (*.json)';
     const suggestedName = customSuggestedName
       ? ensureFileExtension(customSuggestedName, ext)
       : getDefaultFileName(isSaveAs);
@@ -1065,23 +1068,37 @@ export default function App() {
       return 'downloaded';
     }
 
-    const currentHandle = mainMode === 'engineering' ? projectHandleRef.current : optimizationHandleRef.current;
-    const pickerOptions: any = {
-      suggestedName
-    };
-    if (isSaveAs && currentHandle && typeof currentHandle.getFile === 'function') {
-      pickerOptions.startIn = currentHandle;
-    }
-
+    const currentHandle = isEng ? projectHandleRef.current : optimizationHandleRef.current;
     let handle: any = null;
+
     try {
+      const pickerOptions: any = {
+        suggestedName,
+        excludeAcceptAllOption: false,
+        types: [
+          {
+            description: desc,
+            accept: {
+              'application/json': [ext]
+            }
+          }
+        ]
+      };
+      if (isSaveAs && currentHandle && typeof currentHandle.getFile === 'function') {
+        pickerOptions.startIn = currentHandle;
+      }
       handle = await (window as any).showSaveFilePicker(pickerOptions);
     } catch (e: any) {
       if (e?.name === 'AbortError') return 'cancelled';
-      console.warn("showSaveFilePicker 异常，自动降级为浏览器直接下载:", e);
-      // 只要系统窗口异常，直接下载，绝不失败
-      await executeExport(suggestedName, isSaveAs, true);
-      return 'downloaded';
+      console.warn("showSaveFilePicker 规范调用异常，尝试纯净选项重试:", e);
+      try {
+        handle = await (window as any).showSaveFilePicker({ suggestedName });
+      } catch (retryErr: any) {
+        if (retryErr?.name === 'AbortError') return 'cancelled';
+        console.warn("showSaveFilePicker 重试失败，自动降级为直接下载:", retryErr);
+        await executeExport(suggestedName, isSaveAs, true);
+        return 'downloaded';
+      }
     }
 
     if (!handle) return 'cancelled';
@@ -1089,11 +1106,13 @@ export default function App() {
     const res = await silentSaveWithHandle(handle, { skipPermissionCheck: true });
     if (res.ok) {
       setConfirmExportOpen(false);
+      toast.success(isSaveAs ? `已成功另存为【${handle.name}】并关联句柄！` : `已成功保存到【${handle.name}】并关联句柄！后续修改按 Ctrl+S 将直接覆写原文件！`);
       return 'saved';
     }
 
     // 若句柄写入失败，自动降级直接下载
     console.warn("句柄写入受限，自动触发直接下载兜底:", res.message);
+    toast.error(`写入文件受限：${res.message || '系统限制'}，已为您下载副本`);
     await executeExport(suggestedName, isSaveAs, true);
     return 'downloaded';
   };
@@ -1104,14 +1123,18 @@ export default function App() {
       const res = await silentSaveWithHandle(existingHandle);
       if (res.ok) return;
 
-      // 句柄写入受限，自动降级直接下载并提醒用户
-      toast.info(`原文件写入受限，已为您直接下载工程文件！`);
-      const safeName = existingHandle.name || getDefaultFileName(false);
-      await executeExport(safeName, false, true);
+      if (res.reason === 'permission_denied') {
+        toast.error("未授予本地文件写入权限，请重新授权或另存为新文件");
+        return;
+      }
+
+      // 句柄写入受限，调起原生另存为窗口
+      toast.warning(`原文件写入受限（${res.message || '未知原因'}），为您调起原生另存为`);
+      await pickAndSaveWithNativePicker(false);
       return;
     }
 
-    // 未绑定句柄：调起原生保存框，出错自动直接下载
+    // 未绑定句柄：调起原生保存框，保存后立即绑定句柄并升级为绿色【本地文件】
     await pickAndSaveWithNativePicker(false);
   };
 
@@ -1509,11 +1532,14 @@ export default function App() {
             if (mainMode === 'engineering') {
               setCurrentProjectName(item.name.replace(/\.[^/.]+$/, ""));
               updateProjectHandle(handle);
+              setSavedEngRev(engRev);
             } else {
               setCurrentOptimizationName(item.name.replace(/\.[^/.]+$/, ""));
               updateOptimizationHandle(handle);
+              setSavedOptRev(optRev);
             }
             setHistoryFolderOpen(false);
+            toast.success(`已打开本地文件【${item.name}】并关联句柄！后续修改按 Ctrl+S 直接覆写！`);
           }
           return;
         } catch (handleErr) {
@@ -1526,7 +1552,7 @@ export default function App() {
         }
       } else if (item.data) {
         if (applyCachedDataFallback()) {
-          toast.info("已加载浏览器缓存数据（该历史记录未关联本地文件，如需覆盖保存请点击「从本地文件导入」）");
+          toast.info("已加载浏览器缓存数据（该历史记录未关联本地文件，如需覆盖原文件请点击「打开工程」重新关联）");
           setHistoryFolderOpen(false);
         }
       }
@@ -1536,50 +1562,61 @@ export default function App() {
     }
   };
 
-  const importFromLocalFile = async (startInHandle?: any) => {
-    if (canUseNativeFilePicker) {
+  const openLocalProjectWithHandle = async (startInHandle?: any) => {
+    if (!canUseNativeFilePicker) {
+      toast.info("当前环境不支持原生文件句柄，已为您调起标准导入通道");
+      triggerFallbackFileInput();
+      return;
+    }
+
+    const isEng = mainMode === 'engineering';
+    const ext = isEng ? '.wce' : '.json';
+    const desc = isEng ? '型材工程文件 (*.wce, *.json)' : '型材套裁优化文件 (*.json)';
+
+    let handles: any[] | null = null;
+    try {
       const pickerOptions: any = {
         multiple: false,
         excludeAcceptAllOption: false,
         types: [{
-          description: mainMode === 'engineering' ? '型材工程文件 (*.wce, *.json)' : '型材套裁优化文件 (*.json)',
+          description: desc,
           accept: {
-            'application/json': mainMode === 'engineering' ? ['.wce', '.json'] : ['.json']
+            'application/json': isEng ? ['.wce', '.json'] : ['.json']
           }
         }]
       };
-      if (startInHandle) {
+      if (startInHandle && typeof startInHandle.getFile === 'function') {
         pickerOptions.startIn = startInHandle;
       }
-
-      let handles: any[] | null = null;
+      handles = await (window as any).showOpenFilePicker(pickerOptions);
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return;
+      console.warn("showOpenFilePicker 规范过滤失败，尝试纯净选项重试:", e);
       try {
-        handles = await (window as any).showOpenFilePicker(pickerOptions);
-      } catch (e: any) {
-        if (e?.name === 'AbortError') return;
-        try {
-          handles = await (window as any).showOpenFilePicker({ multiple: false });
-        } catch (retryErr: any) {
-          if (retryErr?.name === 'AbortError') return;
-          console.warn("showOpenFilePicker retry failed, fallback to native input:", retryErr);
-        }
-      }
-
-      if (handles && handles[0]) {
-        try {
-          const handle = handles[0];
-          const file = await handle.getFile();
-          await queueOrExecuteImport(file, handle);
-          return;
-        } catch (fileErr: any) {
-          console.error("Failed to read selected file from handle:", fileErr);
-          toast.error(`读取本地文件失败：${fileErr?.message || '请确认文件可读'}`);
-          return;
-        }
+        handles = await (window as any).showOpenFilePicker({ multiple: false });
+      } catch (retryErr: any) {
+        if (retryErr?.name === 'AbortError') return;
+        console.warn("showOpenFilePicker 重试失败，降级备用 input:", retryErr);
+        triggerFallbackFileInput();
+        return;
       }
     }
-    triggerFallbackFileInput();
+
+    if (handles && handles[0]) {
+      try {
+        const handle = handles[0];
+        const file = await handle.getFile();
+        await queueOrExecuteImport(file, handle);
+        return;
+      } catch (fileErr: any) {
+        console.error("Failed to read selected file from handle:", fileErr);
+        toast.error(`读取本地文件失败：${fileErr?.message || '请确认文件可读'}`);
+        return;
+      }
+    }
   };
+
+  const importFromLocalFile = openLocalProjectWithHandle;
 
   const handleDeletePlan = useCallback((planId: string, revokeRelated: boolean) => {
     const plan = savedPlans.find(p => p.id === planId);
@@ -1893,24 +1930,39 @@ export default function App() {
                    <ClipboardPaste className="h-4 w-4" />
                    {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
                  </Button>
-                  <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
-                    <Upload className="h-4 w-4" />
-                    从本地文件导入
-                    <input
-                      type="file"
-                      accept=".wce,.json,application/json,text/plain,*/*"
-                      className="sr-only"
-                      onClick={(e) => {
-                        (e.target as HTMLInputElement).value = "";
-                      }}
-                      onChange={async (e) => {
-                        const file = e.target.files?.[0];
-                        if (!file) return;
-                        await queueOrExecuteImport(file, null);
-                        e.target.value = "";
-                      }}
-                    />
-                  </label>
+                 {canUseNativeFilePicker && (
+                   <Button 
+                     className="bg-orange-600 hover:bg-orange-700 text-white gap-1.5 font-medium shadow-sm text-sm"
+                     onClick={() => openLocalProjectWithHandle()}
+                     title="打开本地工程文件并直接绑定物理句柄（后续按 Ctrl+S 即可无感直接覆写原文件）"
+                   >
+                     <FolderOpen className="h-4 w-4" />
+                     打开本地工程 (关联句柄)
+                   </Button>
+                 )}
+                 <label className={cn(
+                   "rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-3 text-sm transition-colors",
+                   canUseNativeFilePicker
+                     ? "border border-black/20 text-black/70 hover:text-black hover:bg-black/5"
+                     : "flex-1 bg-orange-600 hover:bg-orange-700 text-white shadow-sm"
+                 )}>
+                   <Upload className="h-4 w-4" />
+                   {canUseNativeFilePicker ? '单向导入数据 (仅缓存)' : '从本地文件导入'}
+                   <input
+                     type="file"
+                     accept=".wce,.json,application/json,text/plain,*/*"
+                     className="sr-only"
+                     onClick={(e) => {
+                       (e.target as HTMLInputElement).value = "";
+                     }}
+                     onChange={async (e) => {
+                       const file = e.target.files?.[0];
+                       if (!file) return;
+                       await queueOrExecuteImport(file, null);
+                       e.target.value = "";
+                     }}
+                   />
+                 </label>
               </DialogFooter>
             </>
           )}
@@ -2046,17 +2098,33 @@ export default function App() {
                 <Plus className="h-4 w-4" />
                 {mainMode === 'engineering' ? '新建工程' : '新建套裁'}
               </Button>
-              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={() => handleImportProjectMain()}>
-                <Upload className="h-4 w-4" />
-                {mainMode === 'engineering' ? '导入工程' : '导入套裁'}
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                className="gap-2 text-orange-600 hover:text-orange-700 hover:bg-orange-50 font-medium" 
+                onClick={() => openLocalProjectWithHandle()}
+                title="选择本地电脑上的工程文件打开，并直接绑定文件句柄（后续按 Ctrl+S 直接静默覆写原文件）"
+              >
+                <FolderOpen className="h-4 w-4 text-orange-600" />
+                {mainMode === 'engineering' ? '打开工程' : '打开套裁'}
               </Button>
-              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleExportProject}>
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                className="gap-2 text-black/60" 
+                onClick={handleExportProject}
+                title="已绑定文件时直接无感静默覆写原文件；未绑定时调起保存窗口并绑定句柄"
+              >
                 <Save className="h-4 w-4" />
                 {mainMode === 'engineering' ? '保存工程' : '保存套裁'}
               </Button>
               <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleSaveAsProject}>
                 <Save className="h-4 w-4" />
                 另存为
+              </Button>
+              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={() => handleImportProjectMain()}>
+                <History className="h-4 w-4" />
+                历史工程
               </Button>
 
             </div>
