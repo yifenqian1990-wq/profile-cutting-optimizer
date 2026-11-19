@@ -1127,6 +1127,18 @@ export default function App() {
     await pickAndSaveWithNativePicker(true);
   };
 
+  useEffect(() => {
+    const handleGlobalSaveShortcut = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleExportProject();
+      }
+    };
+    window.addEventListener('keydown', handleGlobalSaveShortcut);
+    return () => window.removeEventListener('keydown', handleGlobalSaveShortcut);
+  }, [handleExportProject]);
+
   const validateAndApplyImportedData = (data: any, silentToast = false): boolean => {
     if (!data || typeof data !== 'object') {
       toast.error("文件内容无效，无法识别为有效的项目数据");
@@ -1902,27 +1914,20 @@ export default function App() {
                    <ClipboardPaste className="h-4 w-4" />
                    {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
                  </Button>
-                 <div className="relative flex-1">
-                   <Button type="button" className="w-full bg-orange-600 hover:bg-orange-700 text-white gap-2 font-medium">
-                     <Upload className="h-4 w-4" />
-                     从本地文件导入
-                   </Button>
-                   <input
-                     type="file"
-                     accept=".wce,.json,application/json,text/plain"
-                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                     title="点击选择本地 .wce 或 .json 文件"
-                     onClick={(e) => {
-                       (e.target as HTMLInputElement).value = '';
-                     }}
-                     onChange={async (e) => {
-                       const file = e.target.files?.[0];
-                       if (!file) return;
-                       await queueOrExecuteImport(file, null);
-                       e.target.value = '';
-                     }}
-                   />
-                 </div>
+                 <Button
+                   type="button"
+                   className="flex-1 bg-orange-600 hover:bg-orange-700 text-white gap-2 font-medium"
+                   onClick={() => {
+                     if (canUseNativeFilePicker) {
+                       importFromLocalFile();
+                     } else {
+                       triggerFallbackFileInput();
+                     }
+                   }}
+                 >
+                   <Upload className="h-4 w-4" />
+                   从本地文件导入
+                 </Button>
               </DialogFooter>
             </>
           )}
