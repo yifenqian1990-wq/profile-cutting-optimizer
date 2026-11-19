@@ -1291,18 +1291,6 @@ export default function App() {
       return false;
     }
 
-    // Request readwrite permission if handle is available
-    if (pendingHandle && typeof pendingHandle.queryPermission === 'function') {
-      try {
-        const perm = await pendingHandle.queryPermission({ mode: 'readwrite' });
-        if (perm !== 'granted' && typeof pendingHandle.requestPermission === 'function') {
-          await pendingHandle.requestPermission({ mode: 'readwrite' });
-        }
-      } catch (e) {
-        // Non-fatal: save will request permission again if needed
-      }
-    }
-
     if (targetMode === 'engineering') {
       setCurrentProjectName(fileName.replace(/\.[^/.]+$/, ""));
       updateProjectHandle(pendingHandle || null);
