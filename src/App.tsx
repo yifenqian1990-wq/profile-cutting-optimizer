@@ -1072,7 +1072,6 @@ export default function App() {
   ): Promise<'saved' | 'cancelled' | 'failed' | 'downloaded'> => {
     const isEng = mainMode === 'engineering';
     const ext = isEng ? '.wce' : '.json';
-    const desc = isEng ? '型材工程文件 (*.wce)' : '型材优化套裁文件 (*.json)';
     const suggestedName = customSuggestedName
       ? ensureFileExtension(customSuggestedName, ext)
       : getDefaultFileName(isSaveAs);
@@ -1087,16 +1086,25 @@ export default function App() {
     let handle: any = null;
 
     try {
+      const saveTypes = isEng ? [
+        {
+          description: '型材工程文件 (*.wce)',
+          accept: { 'application/octet-stream': ['.wce'] }
+        },
+        {
+          description: 'JSON 数据文件 (*.json)',
+          accept: { 'application/json': ['.json'] }
+        }
+      ] : [
+        {
+          description: '型材优化套裁文件 (*.json)',
+          accept: { 'application/json': ['.json'] }
+        }
+      ];
+
       const pickerOptions: any = {
         suggestedName,
-        types: [
-          {
-            description: desc,
-            accept: isEng
-              ? { 'application/octet-stream': ['.wce'], 'application/json': ['.json'] }
-              : { 'application/json': ['.json'] }
-          }
-        ]
+        types: saveTypes
       };
       if (isSaveAs && currentHandle && typeof currentHandle.getFile === 'function') {
         pickerOptions.startIn = currentHandle;
@@ -1104,15 +1112,10 @@ export default function App() {
       handle = await (window as any).showSaveFilePicker(pickerOptions);
     } catch (e: any) {
       if (e?.name === 'AbortError') return 'cancelled';
-      console.warn("showSaveFilePicker 规范调用异常，尝试纯净选项重试:", e);
-      try {
-        handle = await (window as any).showSaveFilePicker({ suggestedName });
-      } catch (retryErr: any) {
-        if (retryErr?.name === 'AbortError') return 'cancelled';
-        console.warn("showSaveFilePicker 重试失败，自动降级为直接下载:", retryErr);
-        await executeExport(suggestedName, isSaveAs, true);
-        return 'downloaded';
-      }
+      console.warn("showSaveFilePicker 异常，降级直接下载:", e);
+      toast.error(`调起保存窗口受限：${e?.message || '请检查权限'}，已为您下载副本`);
+      await executeExport(suggestedName, isSaveAs, true);
+      return 'downloaded';
     }
 
     if (!handle) return 'cancelled';
@@ -1418,12 +1421,7 @@ export default function App() {
       return;
     }
     
-    // 在支持原生文件系统的电脑浏览器上，点击顶部【导入工程】直接调起文件窗口并直接形成句柄！
-    if (canUseNativeFilePicker) {
-      await openLocalProjectWithHandle();
-      return;
-    }
-
+    // 点击顶部【导入工程】，严格按原设计先弹出工程历史记录弹窗！
     setConfirmImportOpen(false);
     setPasteImportOpen(false);
     await loadHistoryList();
@@ -1590,24 +1588,27 @@ export default function App() {
     }
 
     const isEng = mainMode === 'engineering';
-    const ext = isEng ? '.wce' : '.json';
-    const desc = isEng ? '型材工程文件 (*.wce, *.json)' : '型材套裁优化文件 (*.json)';
+    const openTypes = isEng ? [
+      {
+        description: '型材工程文件 (*.wce)',
+        accept: { 'application/octet-stream': ['.wce'] }
+      },
+      {
+        description: 'JSON 数据文件 (*.json)',
+        accept: { 'application/json': ['.json'] }
+      }
+    ] : [
+      {
+        description: '型材优化套裁文件 (*.json)',
+        accept: { 'application/json': ['.json'] }
+      }
+    ];
 
     let handles: any[] | null = null;
     try {
       const pickerOptions: any = {
         multiple: false,
-        types: [{
-          description: desc,
-          accept: isEng
-            ? {
-                'application/octet-stream': ['.wce'],
-                'application/json': ['.json']
-              }
-            : {
-                'application/json': ['.json']
-              }
-        }]
+        types: openTypes
       };
       if (startInHandle && typeof startInHandle.getFile === 'function') {
         pickerOptions.startIn = startInHandle;
@@ -1615,18 +1616,11 @@ export default function App() {
       handles = await (window as any).showOpenFilePicker(pickerOptions);
     } catch (e: any) {
       if (e?.name === 'AbortError') {
-        await loadHistoryList();
-        setHistoryFolderOpen(true);
         return;
       }
-      console.warn("showOpenFilePicker 规范过滤失败，尝试纯净选项重试:", e);
-      try {
-        handles = await (window as any).showOpenFilePicker({ multiple: false });
-      } catch (retryErr: any) {
-        await loadHistoryList();
-        setHistoryFolderOpen(true);
-        return;
-      }
+      console.warn("showOpenFilePicker 出现异常，降级到标准文件选择:", e);
+      triggerFallbackFileInput();
+      return;
     }
 
     if (handles && handles[0]) {
@@ -1641,6 +1635,14 @@ export default function App() {
         return;
       }
     }
+  };
+
+  const handleImportFromLocalFileInDialog = async () => {
+    if (canUseNativeFilePicker) {
+      await openLocalProjectWithHandle();
+      return;
+    }
+    triggerFallbackFileInput();
   };
 
   const importFromLocalFile = openLocalProjectWithHandle;
@@ -1957,27 +1959,14 @@ export default function App() {
                    <ClipboardPaste className="h-4 w-4" />
                    {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
                  </Button>
-                 <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
+                 <Button
+                   type="button"
+                   className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium py-2 px-4 shadow-sm transition-colors text-sm"
+                   onClick={handleImportFromLocalFileInDialog}
+                 >
                    <Upload className="h-4 w-4" />
                    从本地文件导入
-                   <input
-                     type="file"
-                     accept=".wce,.json,application/json,text/plain,*/*"
-                     className="sr-only"
-                     onClick={(e) => {
-                       (e.target as HTMLInputElement).value = "";
-                     }}
-                     onChange={async (e) => {
-                       const file = e.target.files?.[0];
-                       if (!file) return;
-                       try {
-                         await queueOrExecuteImport(file, null);
-                       } finally {
-                         e.target.value = "";
-                       }
-                     }}
-                   />
-                 </label>
+                 </Button>
               </DialogFooter>
             </>
           )}
