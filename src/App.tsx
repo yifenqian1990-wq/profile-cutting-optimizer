@@ -1065,18 +1065,10 @@ export default function App() {
       return 'downloaded';
     }
 
-    // 正确规范的 MIME 映射：禁止使用 application/octet-stream，改用 application/json
-    const pickerOptions: any = {
-      suggestedName,
-      excludeAcceptAllOption: false,
-      types: [{
-        description: mainMode === 'engineering' ? '型材工程文件 (*.wce, *.json)' : '型材套裁优化文件 (*.json)',
-        accept: {
-          'application/json': mainMode === 'engineering' ? ['.wce', '.json'] : ['.json']
-        }
-      }]
-    };
     const currentHandle = mainMode === 'engineering' ? projectHandleRef.current : optimizationHandleRef.current;
+    const pickerOptions: any = {
+      suggestedName
+    };
     if (isSaveAs && currentHandle && typeof currentHandle.getFile === 'function') {
       pickerOptions.startIn = currentHandle;
     }
