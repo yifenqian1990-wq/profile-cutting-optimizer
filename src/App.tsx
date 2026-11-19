@@ -1930,39 +1930,34 @@ export default function App() {
                    <ClipboardPaste className="h-4 w-4" />
                    {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
                  </Button>
-                 {canUseNativeFilePicker && (
+                 {canUseNativeFilePicker ? (
                    <Button 
-                     className="bg-orange-600 hover:bg-orange-700 text-white gap-1.5 font-medium shadow-sm text-sm"
+                     className="flex-1 bg-orange-600 hover:bg-orange-700 text-white gap-2 font-medium shadow-sm text-sm"
                      onClick={() => openLocalProjectWithHandle()}
-                     title="打开本地工程文件并直接绑定物理句柄（后续按 Ctrl+S 即可无感直接覆写原文件）"
                    >
-                     <FolderOpen className="h-4 w-4" />
-                     打开本地工程 (关联句柄)
+                     <Upload className="h-4 w-4" />
+                     从本地文件导入
                    </Button>
+                 ) : (
+                   <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
+                     <Upload className="h-4 w-4" />
+                     从本地文件导入
+                     <input
+                       type="file"
+                       accept=".wce,.json,application/json,text/plain,*/*"
+                       className="sr-only"
+                       onClick={(e) => {
+                         (e.target as HTMLInputElement).value = "";
+                       }}
+                       onChange={async (e) => {
+                         const file = e.target.files?.[0];
+                         if (!file) return;
+                         await queueOrExecuteImport(file, null);
+                         e.target.value = "";
+                       }}
+                     />
+                   </label>
                  )}
-                 <label className={cn(
-                   "rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-3 text-sm transition-colors",
-                   canUseNativeFilePicker
-                     ? "border border-black/20 text-black/70 hover:text-black hover:bg-black/5"
-                     : "flex-1 bg-orange-600 hover:bg-orange-700 text-white shadow-sm"
-                 )}>
-                   <Upload className="h-4 w-4" />
-                   {canUseNativeFilePicker ? '单向导入数据 (仅缓存)' : '从本地文件导入'}
-                   <input
-                     type="file"
-                     accept=".wce,.json,application/json,text/plain,*/*"
-                     className="sr-only"
-                     onClick={(e) => {
-                       (e.target as HTMLInputElement).value = "";
-                     }}
-                     onChange={async (e) => {
-                       const file = e.target.files?.[0];
-                       if (!file) return;
-                       await queueOrExecuteImport(file, null);
-                       e.target.value = "";
-                     }}
-                   />
-                 </label>
               </DialogFooter>
             </>
           )}
@@ -2098,33 +2093,17 @@ export default function App() {
                 <Plus className="h-4 w-4" />
                 {mainMode === 'engineering' ? '新建工程' : '新建套裁'}
               </Button>
-              <Button 
-                variant="ghost" 
-                size="sm" 
-                className="gap-2 text-orange-600 hover:text-orange-700 hover:bg-orange-50 font-medium" 
-                onClick={() => openLocalProjectWithHandle()}
-                title="选择本地电脑上的工程文件打开，并直接绑定文件句柄（后续按 Ctrl+S 直接静默覆写原文件）"
-              >
-                <FolderOpen className="h-4 w-4 text-orange-600" />
-                {mainMode === 'engineering' ? '打开工程' : '打开套裁'}
+              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={() => handleImportProjectMain()}>
+                <Upload className="h-4 w-4" />
+                {mainMode === 'engineering' ? '导入工程' : '导入套裁'}
               </Button>
-              <Button 
-                variant="ghost" 
-                size="sm" 
-                className="gap-2 text-black/60" 
-                onClick={handleExportProject}
-                title="已绑定文件时直接无感静默覆写原文件；未绑定时调起保存窗口并绑定句柄"
-              >
+              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleExportProject}>
                 <Save className="h-4 w-4" />
                 {mainMode === 'engineering' ? '保存工程' : '保存套裁'}
               </Button>
               <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleSaveAsProject}>
                 <Save className="h-4 w-4" />
                 另存为
-              </Button>
-              <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={() => handleImportProjectMain()}>
-                <History className="h-4 w-4" />
-                历史工程
               </Button>
 
             </div>
