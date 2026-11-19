@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import { get, set } from 'idb-keyval';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1564,8 +1564,7 @@ export default function App() {
         types: [{
           description: mainMode === 'engineering' ? '型材工程文件 (*.wce, *.json)' : '型材套裁优化文件 (*.json)',
           accept: {
-            'application/json': mainMode === 'engineering' ? ['.wce', '.json'] : ['.json'],
-            'text/plain': ['.wce', '.json']
+            'application/json': mainMode === 'engineering' ? ['.wce', '.json'] : ['.json']
           }
         }]
       };
@@ -1914,20 +1913,37 @@ export default function App() {
                    <ClipboardPaste className="h-4 w-4" />
                    {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
                  </Button>
-                 <Button
-                   type="button"
-                   className="flex-1 bg-orange-600 hover:bg-orange-700 text-white gap-2 font-medium"
-                   onClick={() => {
-                     if (canUseNativeFilePicker) {
-                       importFromLocalFile();
-                     } else {
-                       triggerFallbackFileInput();
-                     }
-                   }}
-                 >
-                   <Upload className="h-4 w-4" />
-                   从本地文件导入
-                 </Button>
+                 <div className="relative flex-1">
+                   <Button
+                     type="button"
+                     className="w-full bg-orange-600 hover:bg-orange-700 text-white gap-2 font-medium"
+                     onClick={() => {
+                       if (canUseNativeFilePicker) {
+                         importFromLocalFile();
+                       }
+                     }}
+                   >
+                     <Upload className="h-4 w-4" />
+                     从本地文件导入
+                   </Button>
+                   {!canUseNativeFilePicker && (
+                     <input
+                       type="file"
+                       accept=".wce,.json,application/json,text/plain"
+                       className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                       title="点击选择本地 .wce 或 .json 文件"
+                       onClick={(e) => {
+                         (e.target as HTMLInputElement).value = "";
+                       }}
+                       onChange={async (e) => {
+                         const file = e.target.files?.[0];
+                         if (!file) return;
+                         await queueOrExecuteImport(file, null);
+                         e.target.value = "";
+                       }}
+                     />
+                   )}
+                 </div>
               </DialogFooter>
             </>
           )}
