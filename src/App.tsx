@@ -1086,25 +1086,8 @@ export default function App() {
     let handle: any = null;
 
     try {
-      const saveTypes = isEng ? [
-        {
-          description: '型材工程文件 (*.wce)',
-          accept: { 'application/octet-stream': ['.wce'] }
-        },
-        {
-          description: 'JSON 数据文件 (*.json)',
-          accept: { 'application/json': ['.json'] }
-        }
-      ] : [
-        {
-          description: '型材优化套裁文件 (*.json)',
-          accept: { 'application/json': ['.json'] }
-        }
-      ];
-
       const pickerOptions: any = {
-        suggestedName,
-        types: saveTypes
+        suggestedName
       };
       if (isSaveAs && currentHandle && typeof currentHandle.getFile === 'function') {
         pickerOptions.startIn = currentHandle;
@@ -1587,28 +1570,10 @@ export default function App() {
       return;
     }
 
-    const isEng = mainMode === 'engineering';
-    const openTypes = isEng ? [
-      {
-        description: '型材工程文件 (*.wce)',
-        accept: { 'application/octet-stream': ['.wce'] }
-      },
-      {
-        description: 'JSON 数据文件 (*.json)',
-        accept: { 'application/json': ['.json'] }
-      }
-    ] : [
-      {
-        description: '型材优化套裁文件 (*.json)',
-        accept: { 'application/json': ['.json'] }
-      }
-    ];
-
     let handles: any[] | null = null;
     try {
       const pickerOptions: any = {
-        multiple: false,
-        types: openTypes
+        multiple: false
       };
       if (startInHandle && typeof startInHandle.getFile === 'function') {
         pickerOptions.startIn = startInHandle;
@@ -1618,7 +1583,8 @@ export default function App() {
       if (e?.name === 'AbortError') {
         return;
       }
-      console.warn("showOpenFilePicker 出现异常，降级到标准文件选择:", e);
+      console.warn("showOpenFilePicker 出现异常:", e);
+      toast.error(`调起文件窗口异常：${e?.message || '请检查权限'}`);
       triggerFallbackFileInput();
       return;
     }
