@@ -1013,10 +1013,25 @@ export default function App() {
       const projectData = buildCurrentProjectData();
       const jsonText = JSON.stringify(projectData, null, 2);
 
-      writable = await handle.createWritable({ keepExistingData: false });
-      await writable.write(new Blob([jsonText], { type: 'application/json;charset=utf-8' }));
-      await writable.close();
-      writable = null;
+      let lastErr = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          writable = await handle.createWritable({ keepExistingData: false });
+          await writable.write(new Blob([jsonText], { type: 'application/json;charset=utf-8' }));
+          await writable.close();
+          writable = null;
+          lastErr = null;
+          break;
+        } catch (wErr: any) {
+          lastErr = wErr;
+          if (writable) {
+            try { await writable.abort(); } catch (_) {}
+            writable = null;
+          }
+          await new Promise(r => setTimeout(r, 80));
+        }
+      }
+      if (lastErr) throw lastErr;
 
       const safeName = handle.name || getDefaultFileName(false);
       const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
@@ -1930,34 +1945,27 @@ export default function App() {
                    <ClipboardPaste className="h-4 w-4" />
                    {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
                  </Button>
-                 {canUseNativeFilePicker ? (
-                   <Button 
-                     className="flex-1 bg-orange-600 hover:bg-orange-700 text-white gap-2 font-medium shadow-sm text-sm"
-                     onClick={() => openLocalProjectWithHandle()}
-                   >
-                     <Upload className="h-4 w-4" />
-                     从本地文件导入
-                   </Button>
-                 ) : (
-                   <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
-                     <Upload className="h-4 w-4" />
-                     从本地文件导入
-                     <input
-                       type="file"
-                       accept=".wce,.json,application/json,text/plain,*/*"
-                       className="sr-only"
-                       onClick={(e) => {
-                         (e.target as HTMLInputElement).value = "";
-                       }}
-                       onChange={async (e) => {
-                         const file = e.target.files?.[0];
-                         if (!file) return;
+                 <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
+                   <Upload className="h-4 w-4" />
+                   从本地文件导入
+                   <input
+                     type="file"
+                     accept=".wce,.json,application/json,text/plain,*/*"
+                     className="sr-only"
+                     onClick={(e) => {
+                       (e.target as HTMLInputElement).value = "";
+                     }}
+                     onChange={async (e) => {
+                       const file = e.target.files?.[0];
+                       if (!file) return;
+                       try {
                          await queueOrExecuteImport(file, null);
+                       } finally {
                          e.target.value = "";
-                       }}
-                     />
-                   </label>
-                 )}
+                       }
+                     }}
+                   />
+                 </label>
               </DialogFooter>
             </>
           )}
