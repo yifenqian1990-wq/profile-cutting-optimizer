@@ -996,7 +996,7 @@ export default function App() {
 
   const silentSaveWithHandle = async (
     handle: any,
-    options?: { skipPermissionCheck?: boolean }
+    options?: { skipPermissionCheck?: boolean; silentToast?: boolean }
   ): Promise<{ ok: boolean; reason?: 'permission_denied' | 'not_found' | 'error'; message?: string }> => {
     let writable: any = null;
     try {
@@ -1047,7 +1047,9 @@ export default function App() {
         setSavedOptRev(optRev);
       }
 
-      toast.success("保存成功");
+      if (!options?.silentToast) {
+        toast.success(`已覆写保存原文件【${safeName}】！`);
+      }
       return { ok: true };
     } catch (err: any) {
       if (writable) {
@@ -1086,25 +1088,8 @@ export default function App() {
     let handle: any = null;
 
     try {
-      const saveTypes = isEng ? [
-        {
-          description: '型材工程文件 (*.wce)',
-          accept: { 'application/octet-stream': ['.wce'] }
-        },
-        {
-          description: 'JSON 数据文件 (*.json)',
-          accept: { 'application/json': ['.json'] }
-        }
-      ] : [
-        {
-          description: '型材优化套裁文件 (*.json)',
-          accept: { 'application/json': ['.json'] }
-        }
-      ];
-
       const pickerOptions: any = {
-        suggestedName,
-        types: saveTypes
+        suggestedName
       };
       if (isSaveAs && currentHandle && typeof currentHandle.getFile === 'function') {
         pickerOptions.startIn = currentHandle;
@@ -1112,24 +1097,22 @@ export default function App() {
       handle = await (window as any).showSaveFilePicker(pickerOptions);
     } catch (e: any) {
       if (e?.name === 'AbortError') return 'cancelled';
-      console.warn("showSaveFilePicker 规范选项受限，尝试纯净选项重试:", e);
-      try {
-        handle = await (window as any).showSaveFilePicker({ suggestedName });
-      } catch (retryErr: any) {
-        if (retryErr?.name === 'AbortError') return 'cancelled';
-        console.warn("showSaveFilePicker 重试失败，降级直接下载:", retryErr);
-        toast.error(`调起保存窗口受限：${retryErr?.message || e?.message || '请检查权限'}，已为您下载副本`);
-        await executeExport(suggestedName, isSaveAs, true);
-        return 'downloaded';
-      }
+      console.warn("showSaveFilePicker 异常，降级直接下载:", e);
+      toast.error(`调起保存窗口受限（${e?.message || '请检查权限'}），已为您直接下载副本`);
+      await executeExport(suggestedName, isSaveAs, true);
+      return 'downloaded';
     }
 
     if (!handle) return 'cancelled';
 
-    const res = await silentSaveWithHandle(handle, { skipPermissionCheck: true });
+    const res = await silentSaveWithHandle(handle, { skipPermissionCheck: true, silentToast: true });
     if (res.ok) {
       setConfirmExportOpen(false);
-      toast.success(isSaveAs ? `已成功另存为【${handle.name}】并关联句柄！` : `已成功保存到【${handle.name}】并关联句柄！后续修改按 Ctrl+S 将直接覆写原文件！`);
+      toast.success(
+        isSaveAs
+          ? `已成功另存为【${handle.name}】并关联句柄！后续修改按 Ctrl+S 将直接覆写！`
+          : `已成功保存到【${handle.name}】并关联句柄！后续修改按 Ctrl+S 将直接覆写原文件！`
+      );
       return 'saved';
     }
 
@@ -1346,33 +1329,27 @@ export default function App() {
   };
 
   const queueOrExecuteImport = async (file: File, handle: any = null) => {
-    // CRITICAL for Android/Termux: read and parse the File immediately BEFORE clearing input.value or switching modal state
+    // CRITICAL: read and parse the File immediately BEFORE clearing input.value or switching modal state
     const parsed = await parseImportedFileData(file);
     if (!parsed.ok || !parsed.data) {
       return;
     }
 
-    const hasExistingData =
-      mainMode === 'engineering'
-        ? purchases.length > 0 || profileSales.length > 0 || savedPlans.length > 0
-        : demands.length > 0 || stocks.length > 0 || results !== null;
-
-    if (!hasExistingData) {
-      const ok = await applyImportedParsedData(parsed.data, parsed.fileName, handle);
-      if (ok) {
-        setConfirmImportOpen(false);
-        setHistoryFolderOpen(false);
-      }
-      return;
-    }
-
-    setImportPendingFile(file);
-    setImportPendingData(parsed.data);
-    setImportPendingFileName(parsed.fileName);
-    setImportPendingHandle(handle);
-    setConfirmImportOpen(true);
-    if (!historyFolderOpen) {
-      setHistoryFolderOpen(true);
+    const ok = await applyImportedParsedData(parsed.data, parsed.fileName, handle);
+    if (ok) {
+      setConfirmImportOpen(false);
+      setHistoryFolderOpen(false);
+      setImportPendingFile(null);
+      setImportPendingData(null);
+      setImportPendingFileName("");
+      setImportPendingHandle(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (dialogFileInputRef.current) dialogFileInputRef.current.value = '';
+      toast.success(
+        handle
+          ? `已成功导入【${parsed.fileName}】并关联本地文件！后续按 Ctrl+S 即可直接覆写！`
+          : `已成功导入【${parsed.fileName}】！点击「保存工程」即可直接关联本地文件！`
+      );
     }
   };
 
@@ -1948,14 +1925,38 @@ export default function App() {
                    <ClipboardPaste className="h-4 w-4" />
                    {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
                  </Button>
-                 <Button
-                   type="button"
-                   className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium py-2 px-4 shadow-sm transition-colors text-sm"
-                   onClick={handleImportFromLocalFileInDialog}
-                 >
-                   <Upload className="h-4 w-4" />
-                   从本地文件导入
-                 </Button>
+                 {canUseNativeFilePicker ? (
+                   <Button
+                     type="button"
+                     className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium py-2 px-4 shadow-sm transition-colors text-sm"
+                     onClick={handleImportFromLocalFileInDialog}
+                   >
+                     <Upload className="h-4 w-4" />
+                     从本地文件导入
+                   </Button>
+                 ) : (
+                   <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
+                     <Upload className="h-4 w-4" />
+                     从本地文件导入
+                     <input
+                       type="file"
+                       accept=".wce,.json,application/json,text/plain,*/*"
+                       className="sr-only"
+                       onClick={(e) => {
+                         (e.target as HTMLInputElement).value = "";
+                       }}
+                       onChange={async (e) => {
+                         const file = e.target.files?.[0];
+                         if (!file) return;
+                         try {
+                           await queueOrExecuteImport(file, null);
+                         } finally {
+                           e.target.value = "";
+                         }
+                       }}
+                     />
+                   </label>
+                 )}
               </DialogFooter>
             </>
           )}
