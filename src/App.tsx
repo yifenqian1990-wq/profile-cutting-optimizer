@@ -1115,6 +1115,7 @@ export default function App() {
     const res = await silentSaveWithHandle(handle, { skipPermissionCheck: true, silentToast: true });
     if (res.ok) {
       setConfirmExportOpen(false);
+      alert(`【保存成功】\n已成功保存到本地文件：\n【${handle.name}】\n\n系统已全自动绑定该本地文件物理句柄！\n后续修改按 Ctrl+S 将直接毫秒级覆写该文件！`);
       toast.success(
         isSaveAs
           ? `已成功另存为【${handle.name}】并关联句柄！后续修改按 Ctrl+S 将直接覆写！`
@@ -1132,7 +1133,10 @@ export default function App() {
     const existingHandle = mainMode === 'engineering' ? projectHandleRef.current : optimizationHandleRef.current;
     if (existingHandle) {
       const res = await silentSaveWithHandle(existingHandle);
-      if (res.ok) return;
+      if (res.ok) {
+        alert(`【保存成功】\n已直接覆写本地原文件：\n【${existingHandle.name}】\n\n毫秒级无感保存完成！`);
+        return;
+      }
 
       if (res.reason === 'permission_denied') {
         toast.error("未授予本地文件写入权限，请重新授权或另存为新文件");
@@ -2046,23 +2050,39 @@ export default function App() {
                 型材优化销料管理系统
                 {currentProjectName && (
                   <span
-                    className="relative ml-3 mr-2 text-sm font-normal text-black/60 bg-black/5 px-2 py-1 rounded align-middle flex items-center gap-1"
+                    className="relative ml-3 mr-2 text-sm font-normal text-black/60 bg-black/5 px-2 py-1 rounded align-middle flex items-center gap-1.5"
                     title={currentProjectHandle ? `已绑定本地文件句柄 (${currentProjectHandle.name})，再次保存将直接覆盖原文件` : '未绑定本地文件句柄（点击「保存工程」即可直接关联）'}
                   >
-                    <FolderOpen className="h-3 w-3" />{currentProjectName}
-                    {currentProjectHandle && !isEngDirty && (
-                      <Check className="h-4 w-4 text-green-500 absolute -bottom-1.5 -right-1.5 bg-[#F5F5F4] rounded-full p-[1px] shadow-sm" strokeWidth={4} />
+                    <FolderOpen className="h-3.5 w-3.5 text-black/60" />
+                    <span>{currentProjectName}</span>
+                    {currentProjectHandle ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-100 border border-emerald-300 px-1.5 py-0.5 rounded ml-1">
+                        <Check className="h-3 w-3 text-emerald-600" strokeWidth={3} />
+                        已关联本地文件
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center text-[11px] font-normal text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded ml-1">
+                        未关联本地
+                      </span>
                     )}
                   </span>
                 )}
                 {currentOptimizationName && (
                   <span
-                    className="relative ml-1 text-sm font-normal text-orange-700 bg-orange-100 px-2 py-1 rounded align-middle flex items-center gap-1"
+                    className="relative ml-1 text-sm font-normal text-orange-700 bg-orange-100 px-2 py-1 rounded align-middle flex items-center gap-1.5"
                     title={currentOptimizationHandle ? `已绑定本地文件句柄 (${currentOptimizationHandle.name})，再次保存将直接覆盖原文件` : '未绑定本地文件句柄（保存将导出下载并更新本地缓存）'}
                   >
-                    <FileText className="h-3 w-3" />{currentOptimizationName}
-                    {!isOptDirty && (
-                      <Check className="h-4 w-4 text-green-500 absolute -bottom-1.5 -right-1.5 bg-[#F5F5F4] rounded-full p-[1px] shadow-sm" strokeWidth={4} />
+                    <FileText className="h-3.5 w-3.5 text-orange-700" />
+                    <span>{currentOptimizationName}</span>
+                    {currentOptimizationHandle ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-100 border border-emerald-300 px-1.5 py-0.5 rounded ml-1">
+                        <Check className="h-3 w-3 text-emerald-600" strokeWidth={3} />
+                        已关联本地文件
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center text-[11px] font-normal text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded ml-1">
+                        未关联本地
+                      </span>
                     )}
                   </span>
                 )}
