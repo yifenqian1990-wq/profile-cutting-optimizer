@@ -884,6 +884,7 @@ export default function App() {
 
     if (copied) {
       await saveToHistory(safeName, projectData, oldNameForHistory, null);
+      toast.success("保存成功");
       if (mainMode === 'engineering') {
         setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
         if (isSaveAsExport) updateProjectHandle(null);
@@ -972,19 +973,6 @@ export default function App() {
         setSavedOptRev(optRev);
       }
 
-      if (isInIframe) {
-        toast.warning("内嵌预览窗口无法直接更新本地文件，已尝试下载副本", {
-          description: "请在新标签页独立打开本系统，即可记住文件句柄并直接覆盖原文件"
-        });
-      } else if (!isSecureContextEnv) {
-        toast.info(`已下载文件副本：${safeName}`, {
-          description: "当前为非 HTTPS 地址，浏览器限制无法直接覆盖原文件，请到下载目录查看或改用 HTTPS 访问"
-        });
-      } else {
-        toast.info(`已下载文件副本：${safeName}`, {
-          description: "当前浏览器不支持本地文件句柄直接覆盖，请到下载目录查看或改用 Chrome / Edge"
-        });
-      }
       setConfirmExportOpen(false);
       return true;
     } catch (err: any) {
@@ -1053,9 +1041,6 @@ export default function App() {
         setSavedOptRev(optRev);
       }
 
-      if (!options?.silentToast) {
-        toast.success(`已覆写保存原文件【${safeName}】！`);
-      }
       return { ok: true };
     } catch (err: any) {
       if (writable) {
@@ -1116,32 +1101,31 @@ export default function App() {
     const res = await silentSaveWithHandle(handle, { skipPermissionCheck: true, silentToast: true });
     if (res.ok) {
       setConfirmExportOpen(false);
-      alert(`【保存成功】\n已成功保存到本地文件：\n【${handle.name}】\n\n系统已全自动绑定该本地文件物理句柄！\n后续修改按 Ctrl+S 将直接毫秒级覆写该文件！`);
-      toast.success(
-        isSaveAs
-          ? `已成功另存为【${handle.name}】并关联句柄！后续修改按 Ctrl+S 将直接覆写！`
-          : `已成功保存到【${handle.name}】并关联句柄！后续修改按 Ctrl+S 将直接覆写原文件！`
-      );
+      toast.success("保存成功");
       return 'saved';
     }
 
-    console.warn("句柄写入受限:", res.message);
-    alert(`【句柄保存失败诊断】\n原因代号: ${res.reason || '无'}\n详细信息: ${res.message || '未获取到具体错误'}\n请截图此信息！`);
-    toast.error(`写入文件受限：${res.message || '系统限制'}`);
-    return 'failed';
+    console.warn("句柄写入受限，改用普通下载:", res.message);
+    toast.warning(`本地文件写入受限，已改为下载更新副本：${suggestedName}`, {
+      description: '请在下载目录找到新文件；原文件不会被浏览器自动覆盖。'
+    });
+    await executeExport(suggestedName, isSaveAs, true);
+    return 'downloaded';
   };
 
   const handleExportProject = async () => {
     const existingHandle = mainMode === 'engineering' ? projectHandleRef.current : optimizationHandleRef.current;
     if (existingHandle) {
-      const res = await silentSaveWithHandle(existingHandle);
+      const res = await silentSaveWithHandle(existingHandle, { silentToast: true });
       if (res.ok) {
-        alert(`【保存成功】\n已直接覆写本地原文件：\n【${existingHandle.name}】\n\n毫秒级无感保存完成！`);
+        toast.success("保存成功");
         return;
       }
 
       if (res.reason === 'permission_denied') {
-        toast.error("未授予本地文件写入权限，请重新授权或另存为新文件");
+        const fallbackName = getDefaultFileName(false);
+        toast.warning("原文件写入权限被浏览器拒绝，已改为下载更新副本");
+        await executeExport(fallbackName, false, true);
         return;
       }
 
@@ -1151,7 +1135,16 @@ export default function App() {
       return;
     }
 
-    // 未绑定句柄：调起原生保存框，保存后立即绑定句柄并升级为绿色【本地文件】
+    // 仅缓存/普通文件导入没有真实本地句柄：首次保存时选择一次本地文件并绑定句柄。
+    const cachedName = mainMode === 'engineering'
+      ? currentProjectName
+      : currentOptimizationName;
+    if (cachedName) {
+      const cachedExt = mainMode === 'engineering' ? '.wce' : '.json';
+      await pickAndSaveWithNativePicker(false, ensureFileExtension(cachedName, cachedExt));
+      return;
+    }
+    // 全新工程同样调起原生保存框，保存后立即绑定句柄。
     await pickAndSaveWithNativePicker(false);
   };
 
@@ -1348,6 +1341,7 @@ export default function App() {
 
     const ok = await applyImportedParsedData(parsed.data, parsed.fileName, handle);
     if (ok) {
+      toast.success(handle ? `已导入本地文件：${parsed.fileName}` : `已导入文件：${parsed.fileName}`);
       setConfirmImportOpen(false);
       setHistoryFolderOpen(false);
       setImportPendingFile(null);
@@ -1356,11 +1350,6 @@ export default function App() {
       setImportPendingHandle(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
       if (dialogFileInputRef.current) dialogFileInputRef.current.value = '';
-      if (handle) {
-        alert(`【导入并关联成功！】\n已成功载入工程数据，并全自动关联本地物理文件：\n【${handle.name}】\n\n顶部已点亮 [已关联本地文件] 徽章！\n后续修改按 Ctrl+S 将直接毫秒级覆写原文件！`);
-      } else {
-        alert(`【工程导入成功！】\n已成功载入工程数据：【${parsed.fileName}】\n\n提示：按键盘【Ctrl + S】或点击顶部【保存工程】，选择原文件保存一次即可永久自动关联本地文件，后续所有修改将 0 弹窗毫秒级直接覆写！`);
-      }
     }
   };
 
@@ -1551,7 +1540,6 @@ export default function App() {
               setSavedOptRev(optRev);
             }
             setHistoryFolderOpen(false);
-            toast.success(`已打开本地文件【${item.name}】并关联句柄！后续修改按 Ctrl+S 直接覆写！`);
           }
           return;
         } catch (handleErr) {
@@ -1564,7 +1552,6 @@ export default function App() {
         }
       } else if (item.data) {
         if (applyCachedDataFallback()) {
-          toast.info("已加载浏览器缓存数据（该历史记录未关联本地文件，如需覆盖原文件请点击「打开工程」重新关联）");
           setHistoryFolderOpen(false);
         }
       }
@@ -1584,7 +1571,16 @@ export default function App() {
     let handles: any[] | null = null;
     try {
       const pickerOptions: any = {
-        multiple: false
+        multiple: false,
+        types: [
+          {
+            description: '工程文件或套裁文件',
+            accept: {
+              'application/json': ['.wce', '.json']
+            }
+          }
+        ],
+        excludeAcceptAllOption: false
       };
       if (startInHandle && typeof startInHandle.getFile === 'function') {
         pickerOptions.startIn = startInHandle;
@@ -1936,27 +1932,13 @@ export default function App() {
                    <ClipboardPaste className="h-4 w-4" />
                    {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
                  </Button>
-                 <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
+                 <Button
+                   className="flex-1 bg-orange-600 hover:bg-orange-700 text-white gap-2"
+                   onClick={handleImportFromLocalFileInDialog}
+                 >
                    <Upload className="h-4 w-4" />
                    从本地文件导入
-                   <input
-                     type="file"
-                     accept=".wce,.json,application/json,text/plain,*/*"
-                     className="sr-only"
-                     onClick={(e) => {
-                       (e.target as HTMLInputElement).value = "";
-                     }}
-                     onChange={async (e) => {
-                       const file = e.target.files?.[0];
-                       if (!file) return;
-                       try {
-                         await queueOrExecuteImport(file, null);
-                       } finally {
-                         e.target.value = "";
-                       }
-                     }}
-                   />
-                 </label>
+                 </Button>
               </DialogFooter>
             </>
           )}
@@ -2053,38 +2035,24 @@ export default function App() {
                 {currentProjectName && (
                   <span
                     className="relative ml-3 mr-2 text-sm font-normal text-black/60 bg-black/5 px-2 py-1 rounded align-middle flex items-center gap-1.5"
-                    title={currentProjectHandle ? `已绑定本地文件句柄 (${currentProjectHandle.name})，再次保存将直接覆盖原文件` : '未绑定本地文件句柄（点击「保存工程」即可直接关联）'}
+                    title={currentProjectHandle ? `已绑定本地文件句柄 (${currentProjectHandle.name})，再次保存将直接覆盖原文件` : '当前工程文件未绑定本地文件句柄'}
                   >
                     <FolderOpen className="h-3.5 w-3.5 text-black/60" />
                     <span>{currentProjectName}</span>
-                    {currentProjectHandle ? (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-100 border border-emerald-300 px-1.5 py-0.5 rounded ml-1">
-                        <Check className="h-3 w-3 text-emerald-600" strokeWidth={3} />
-                        已关联本地文件
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center text-[11px] font-normal text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded ml-1" title="按 Ctrl+S 确认保存即可全自动关联本地物理文件">
-                        未关联本地 (按Ctrl+S关联)
-                      </span>
+                    {currentProjectHandle && !isEngDirty && (
+                      <Check className="h-3.5 w-3.5 text-emerald-600" strokeWidth={3} title="已保存" />
                     )}
                   </span>
                 )}
                 {currentOptimizationName && (
                   <span
                     className="relative ml-1 text-sm font-normal text-orange-700 bg-orange-100 px-2 py-1 rounded align-middle flex items-center gap-1.5"
-                    title={currentOptimizationHandle ? `已绑定本地文件句柄 (${currentOptimizationHandle.name})，再次保存将直接覆盖原文件` : '未绑定本地文件句柄（保存将导出下载并更新本地缓存）'}
+                    title={currentOptimizationHandle ? `已绑定本地文件句柄 (${currentOptimizationHandle.name})，再次保存将直接覆盖原文件` : '当前套裁文件未绑定本地文件句柄'}
                   >
                     <FileText className="h-3.5 w-3.5 text-orange-700" />
                     <span>{currentOptimizationName}</span>
-                    {currentOptimizationHandle ? (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-100 border border-emerald-300 px-1.5 py-0.5 rounded ml-1">
-                        <Check className="h-3 w-3 text-emerald-600" strokeWidth={3} />
-                        已关联本地文件
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center text-[11px] font-normal text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded ml-1" title="按 Ctrl+S 确认保存即可全自动关联本地物理文件">
-                        未关联本地 (按Ctrl+S关联)
-                      </span>
+                    {currentOptimizationHandle && !isOptDirty && (
+                      <Check className="h-3.5 w-3.5 text-emerald-600" strokeWidth={3} title="已保存" />
                     )}
                   </span>
                 )}
