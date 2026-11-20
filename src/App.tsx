@@ -1013,25 +1013,11 @@ export default function App() {
       const projectData = buildCurrentProjectData();
       const jsonText = JSON.stringify(projectData, null, 2);
 
-      let lastErr = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          writable = await handle.createWritable({ keepExistingData: false });
-          await writable.write(new Blob([jsonText], { type: 'application/json;charset=utf-8' }));
-          await writable.close();
-          writable = null;
-          lastErr = null;
-          break;
-        } catch (wErr: any) {
-          lastErr = wErr;
-          if (writable) {
-            try { await writable.abort(); } catch (_) {}
-            writable = null;
-          }
-          await new Promise(r => setTimeout(r, 80));
-        }
-      }
-      if (lastErr) throw lastErr;
+      // 完全对齐官方规范与实测成功标准代码：无参调用 createWritable，直接写入原始 jsonText 字符串
+      writable = await handle.createWritable();
+      await writable.write(jsonText);
+      await writable.close();
+      writable = null;
 
       const safeName = handle.name || getDefaultFileName(false);
       const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
@@ -1116,11 +1102,9 @@ export default function App() {
       return 'saved';
     }
 
-    // 若句柄写入失败，自动降级直接下载
-    console.warn("句柄写入受限，自动触发直接下载兜底:", res.message);
-    toast.error(`写入文件受限：${res.message || '系统限制'}，已为您下载副本`);
-    await executeExport(suggestedName, isSaveAs, true);
-    return 'downloaded';
+    console.warn("句柄写入受限:", res.message);
+    toast.error(`写入文件受限：${res.message || '系统限制'}`);
+    return 'failed';
   };
 
   const handleExportProject = async () => {
