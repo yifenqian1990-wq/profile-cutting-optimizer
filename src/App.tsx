@@ -1064,6 +1064,7 @@ export default function App() {
         } catch (_) {}
       }
       console.error("Silent save to handle failed:", err);
+      alert(`【底层写入流异常诊断】\n错误类型: ${err?.name}\n详细原因: ${err?.message}\n请检查文件是否被其他程序占用或权限受限！`);
       if (err?.name === 'NotAllowedError' || err?.name === 'SecurityError') {
         return { ok: false, reason: 'permission_denied', message: err?.message || '文件写入权限被拒绝' };
       }
@@ -1085,7 +1086,7 @@ export default function App() {
       : getDefaultFileName(isSaveAs);
 
     if (!canUseNativeFilePicker) {
-      // 浏览器不支持原生文件系统 API 时，100% 触发直接下载
+      alert(`【环境诊断提示】当前浏览器环境未开放本地文件物理句柄权限！\n\n原因诊断：\n- 访问协议: ${window.location.protocol} (要求必须为 https:// 或 localhost)\n- 安全上下文: ${window.isSecureContext ? '正常' : '异常(非安全上下文，Chrome强制禁用写句柄)'}\n- 原生API支持: ${typeof (window as any).showSaveFilePicker}\n- 是否处于iframe: ${isInIframe ? '是(受限)' : '否'}\n\n系统已为您直接下载文件副本。请确保通过 https://tc.yifen.us.ci 独立标签页访问！`);
       await executeExport(suggestedName, isSaveAs, true);
       return 'downloaded';
     }
@@ -1125,6 +1126,7 @@ export default function App() {
     }
 
     console.warn("句柄写入受限:", res.message);
+    alert(`【句柄保存失败诊断】\n原因代号: ${res.reason || '无'}\n详细信息: ${res.message || '未获取到具体错误'}\n请截图此信息！`);
     toast.error(`写入文件受限：${res.message || '系统限制'}`);
     return 'failed';
   };
