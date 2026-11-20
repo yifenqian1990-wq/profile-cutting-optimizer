@@ -1354,11 +1354,11 @@ export default function App() {
       setImportPendingHandle(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
       if (dialogFileInputRef.current) dialogFileInputRef.current.value = '';
-      toast.success(
-        handle
-          ? `已成功导入【${parsed.fileName}】并关联本地文件！后续按 Ctrl+S 即可直接覆写！`
-          : `已成功导入【${parsed.fileName}】！点击「保存工程」即可直接关联本地文件！`
-      );
+      if (handle) {
+        alert(`【导入并关联成功！】\n已成功载入工程数据，并全自动关联本地物理文件：\n【${handle.name}】\n\n顶部已点亮 [已关联本地文件] 徽章！\n后续修改按 Ctrl+S 将直接毫秒级覆写原文件！`);
+      } else {
+        toast.success(`已成功导入【${parsed.fileName}】！点击「保存工程」即可直接关联本地文件！`);
+      }
     }
   };
 
@@ -1934,27 +1934,38 @@ export default function App() {
                    <ClipboardPaste className="h-4 w-4" />
                    {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
                  </Button>
-                 <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
-                   <Upload className="h-4 w-4" />
-                   从本地文件导入
-                   <input
-                     type="file"
-                     accept=".wce,.json,application/json,text/plain,*/*"
-                     className="sr-only"
-                     onClick={(e) => {
-                       (e.target as HTMLInputElement).value = "";
-                     }}
-                     onChange={async (e) => {
-                       const file = e.target.files?.[0];
-                       if (!file) return;
-                       try {
-                         await queueOrExecuteImport(file, null);
-                       } finally {
-                         e.target.value = "";
-                       }
-                     }}
-                   />
-                 </label>
+                 {canUseNativeFilePicker ? (
+                   <Button
+                     type="button"
+                     className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium py-2 px-4 shadow-sm transition-colors text-sm"
+                     onClick={handleImportFromLocalFileInDialog}
+                   >
+                     <Upload className="h-4 w-4" />
+                     从本地文件导入（自动关联）
+                   </Button>
+                 ) : (
+                   <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
+                     <Upload className="h-4 w-4" />
+                     从本地文件导入
+                     <input
+                       type="file"
+                       accept=".wce,.json,application/json,text/plain,*/*"
+                       className="sr-only"
+                       onClick={(e) => {
+                         (e.target as HTMLInputElement).value = "";
+                       }}
+                       onChange={async (e) => {
+                         const file = e.target.files?.[0];
+                         if (!file) return;
+                         try {
+                           await queueOrExecuteImport(file, null);
+                         } finally {
+                           e.target.value = "";
+                         }
+                       }}
+                     />
+                   </label>
+                 )}
               </DialogFooter>
             </>
           )}
