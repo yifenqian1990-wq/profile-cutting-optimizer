@@ -1006,6 +1006,7 @@ export default function App() {
           perm = await handle.requestPermission({ mode: 'readwrite' });
         }
         if (perm !== 'granted') {
+          alert(`【保存受限】未获得本地文件写入权限（${handle?.name || '未知文件'}）`);
           return { ok: false, reason: 'permission_denied', message: '未授予本地文件写入权限' };
         }
       }
@@ -1013,11 +1014,30 @@ export default function App() {
       const projectData = buildCurrentProjectData();
       const jsonText = JSON.stringify(projectData, null, 2);
 
-      // 完全对齐官方规范与实测成功标准代码：无参调用 createWritable，直接写入原始 jsonText 字符串
-      writable = await handle.createWritable();
-      await writable.write(jsonText);
-      await writable.close();
-      writable = null;
+      try {
+        writable = await handle.createWritable();
+      } catch (cwErr: any) {
+        console.error("createWritable 失败:", cwErr);
+        alert(`【保存失败诊断】打开文件流失败：\n类型: ${cwErr?.name}\n原因: ${cwErr?.message}`);
+        throw cwErr;
+      }
+
+      try {
+        await writable.write(jsonText);
+      } catch (wErr: any) {
+        console.error("writable.write 失败:", wErr);
+        alert(`【保存失败诊断】写入数据失败：\n类型: ${wErr?.name}\n原因: ${wErr?.message}`);
+        throw wErr;
+      }
+
+      try {
+        await writable.close();
+        writable = null;
+      } catch (clErr: any) {
+        console.error("writable.close 失败:", clErr);
+        alert(`【保存失败诊断】提交保存失败：\n类型: ${clErr?.name}\n原因: ${clErr?.message}`);
+        throw clErr;
+      }
 
       const safeName = handle.name || getDefaultFileName(false);
       const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
@@ -1084,6 +1104,7 @@ export default function App() {
     } catch (e: any) {
       if (e?.name === 'AbortError') return 'cancelled';
       console.warn("showSaveFilePicker 异常，降级直接下载:", e);
+      alert(`【调起系统保存窗口异常】\n类型: ${e?.name}\n原因: ${e?.message}`);
       toast.error(`调起保存窗口受限（${e?.message || '请检查权限'}），已为您直接下载副本`);
       await executeExport(suggestedName, isSaveAs, true);
       return 'downloaded';
