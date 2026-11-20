@@ -1357,7 +1357,7 @@ export default function App() {
       if (handle) {
         alert(`【导入并关联成功！】\n已成功载入工程数据，并全自动关联本地物理文件：\n【${handle.name}】\n\n顶部已点亮 [已关联本地文件] 徽章！\n后续修改按 Ctrl+S 将直接毫秒级覆写原文件！`);
       } else {
-        toast.success(`已成功导入【${parsed.fileName}】！点击「保存工程」即可直接关联本地文件！`);
+        alert(`【工程导入成功！】\n已成功载入工程数据：【${parsed.fileName}】\n\n提示：按键盘【Ctrl + S】或点击顶部【保存工程】，选择原文件保存一次即可永久自动关联本地文件，后续所有修改将 0 弹窗毫秒级直接覆写！`);
       }
     }
   };
@@ -1934,38 +1934,27 @@ export default function App() {
                    <ClipboardPaste className="h-4 w-4" />
                    {pasteImportOpen ? '查看缓存' : '粘贴 JSON'}
                  </Button>
-                 {canUseNativeFilePicker ? (
-                   <Button
-                     type="button"
-                     className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium py-2 px-4 shadow-sm transition-colors text-sm"
-                     onClick={handleImportFromLocalFileInDialog}
-                   >
-                     <Upload className="h-4 w-4" />
-                     从本地文件导入（自动关联）
-                   </Button>
-                 ) : (
-                   <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
-                     <Upload className="h-4 w-4" />
-                     从本地文件导入
-                     <input
-                       type="file"
-                       accept=".wce,.json,application/json,text/plain,*/*"
-                       className="sr-only"
-                       onClick={(e) => {
-                         (e.target as HTMLInputElement).value = "";
-                       }}
-                       onChange={async (e) => {
-                         const file = e.target.files?.[0];
-                         if (!file) return;
-                         try {
-                           await queueOrExecuteImport(file, null);
-                         } finally {
-                           e.target.value = "";
-                         }
-                       }}
-                     />
-                   </label>
-                 )}
+                 <label className="flex-1 bg-orange-600 hover:bg-orange-700 text-white rounded-md flex items-center justify-center gap-2 font-medium cursor-pointer py-2 px-4 shadow-sm transition-colors text-sm">
+                   <Upload className="h-4 w-4" />
+                   从本地文件导入
+                   <input
+                     type="file"
+                     accept=".wce,.json,application/json,text/plain,*/*"
+                     className="sr-only"
+                     onClick={(e) => {
+                       (e.target as HTMLInputElement).value = "";
+                     }}
+                     onChange={async (e) => {
+                       const file = e.target.files?.[0];
+                       if (!file) return;
+                       try {
+                         await queueOrExecuteImport(file, null);
+                       } finally {
+                         e.target.value = "";
+                       }
+                     }}
+                   />
+                 </label>
               </DialogFooter>
             </>
           )}
@@ -2072,8 +2061,8 @@ export default function App() {
                         已关联本地文件
                       </span>
                     ) : (
-                      <span className="inline-flex items-center text-[11px] font-normal text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded ml-1">
-                        未关联本地
+                      <span className="inline-flex items-center text-[11px] font-normal text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded ml-1" title="按 Ctrl+S 确认保存即可全自动关联本地物理文件">
+                        未关联本地 (按Ctrl+S关联)
                       </span>
                     )}
                   </span>
@@ -2091,8 +2080,8 @@ export default function App() {
                         已关联本地文件
                       </span>
                     ) : (
-                      <span className="inline-flex items-center text-[11px] font-normal text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded ml-1">
-                        未关联本地
+                      <span className="inline-flex items-center text-[11px] font-normal text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded ml-1" title="按 Ctrl+S 确认保存即可全自动关联本地物理文件">
+                        未关联本地 (按Ctrl+S关联)
                       </span>
                     )}
                   </span>
