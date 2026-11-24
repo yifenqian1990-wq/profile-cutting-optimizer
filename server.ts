@@ -7,19 +7,16 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Worker } from 'worker_threads';
 import { optimizeCutting } from './src/lib/optimizer.server.ts';
-import { createIpGate, isPrivateOrLocalIp, injectTrialBanner } from './ip-gate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-// 信任代理层：从右往左跳过所有内网 IP，第一个公网 IP 即为真实客户端 IP。
-// 攻击者在 X-Forwarded-For 左侧伪造的 IP 排在真实 IP 左边，永远不会被采信；
-// Render 若直接覆盖 XFF 则更简单——此时唯一的公网 IP 就是客户端。
-app.set('trust proxy', (ip) => isPrivateOrLocalIp(ip));
+app.set('trust proxy', true);
 const PORT = parseInt(process.env.API_PORT || '3001', 10);
 
 app.use(cors());
+app.use(express.json({ limit: '50mb' }));
 
 // 客户端诊断日志上报接口
 app.post('/api/client-log', (req, res) => {
@@ -27,7 +24,7 @@ app.post('/api/client-log', (req, res) => {
     const { level = 'info', type = 'App', message = '', detail = null, stack = null } = req.body || {};
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     const time = new Date().toLocaleTimeString('zh-CN');
-    console.log([][ClientLog][][] [] );
+    console.log(`[${time}][ClientLog][${String(level).toUpperCase()}][${ip}] [${type}] ${message}`);
     if (detail) console.log('  -> Detail:', JSON.stringify(detail));
     if (stack) console.log('  -> Stack:', stack);
   } catch (err) {
@@ -35,11 +32,6 @@ app.post('/api/client-log', (req, res) => {
   }
   res.json({ ok: true });
 });
-app.use(express.json({ limit: '50mb' }));
-
-// IP 白名单 + 试用额度访问控制：白名单 IP 无障碍，其他 IP 按试用策略（默认 7 天 / 100 次页面访问）
-// 白名单文件：database/ip-whitelist.json；试用参数见 ip-gate.ts 顶部常量
-app.use(createIpGate());
 
 // Task storage
 const tasks = new Map<string, {
@@ -268,23 +260,11 @@ app.post('/api/cancel/:taskId', (req, res) => {
 });
 
 // 1. 让 Express 能够识别并提供 dist 文件夹里的静态资源（js, css, 图片等）
-//    index:false —— 首页也走下面的兜底路由，以便给试用中的访问注入顶部横幅
 const distPath = path.join(process.cwd(), 'dist'); 
-app.use(express.static(distPath, { index: false }));
+app.use(express.static(distPath));
 
-// 2. 兜底路由：把所有非 API 的请求，全部交给 dist/index.html，由前端 React 路由处理；
-//    试用中的访问（req.trialBanner 由 ip-gate 挂上）会在 HTML 顶部注入试用横幅
+// 2. 兜底路由：把所有非 API 的请求，全部交给 dist/index.html，由前端 React 路由处理
 app.get('*', (req, res) => {
-  const tb = (req as any).trialBanner;
-  if (tb && typeof tb.daysLeft === 'number' && typeof tb.visitsLeft === 'number') {
-    try {
-      const raw = fs.readFileSync(path.join(distPath, 'index.html'), 'utf-8');
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      return res.send(injectTrialBanner(raw, tb.daysLeft, tb.visitsLeft));
-    } catch (e) {
-      console.warn('[ip-gate] 横幅注入失败，回退原生 index.html:', String((e as any)?.message || e));
-    }
-  }
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
