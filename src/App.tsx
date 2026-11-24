@@ -880,6 +880,16 @@ export default function App() {
     } catch (e: any) {
       if (e?.name === 'AbortError') {
         reportClientLog('info', 'BindHandle', '用户关闭了选择文件窗口');
+        toast.info("已关闭文件选择窗口", {
+          description: "若您电脑本地尚无该文件，可先点击右侧「下载副本」到本地后再绑定：",
+          action: {
+            label: "立即下载副本",
+            onClick: () => {
+              void executeExport(suggestedName, false, true);
+            }
+          },
+          duration: 9000
+        });
         return;
       }
       reportClientLog('error', 'BindHandle', `showOpenFilePicker 异常: ${e?.message}`, null, e?.stack);
