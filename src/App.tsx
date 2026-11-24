@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -669,6 +669,14 @@ export default function App() {
   const [pendingSalePlanIds, setPendingSalePlanIds] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dialogFileInputRef = useRef<HTMLInputElement>(null);
+  // 本地文件绑定/救场助手弹窗状态（支持原生选择框 + 免弹窗拖放文件句柄）
+  const [bindHelperOpen, setBindHelperOpen] = useState(false);
+  const [bindHelperMode, setBindHelperMode] = useState<'bind' | 'save_abort'>('bind');
+  const [bindHelperTargetItem, setBindHelperTargetItem] = useState<any>(null);
+  const [bindHelperDroppedHandle, setBindHelperDroppedHandle] = useState<any>(null);
+  const [bindHelperSuggestedName, setBindHelperSuggestedName] = useState<string>("");
+  const [bindHelperDragOver, setBindHelperDragOver] = useState(false);
+  const [bindHelperSubmitting, setBindHelperSubmitting] = useState(false);
 
   const [confirmImportOpen, setConfirmImportOpen] = useState(false);
   const [importPendingFile, setImportPendingFile] = useState<File | null>(null);
@@ -863,119 +871,79 @@ export default function App() {
     }
   };
 
-  const handleBindExistingLocalFile = async () => {
-    reportClientLog('info', 'BindHandle', `用户触发绑定本地文件, 环境: ${navigator.userAgent}`);
-    if (!canUseNativeFilePicker) {
-      alert("当前浏览器环境未开放文件句柄权限（请确保在 Chrome/Edge 中且使用 https:// 独立标签页访问）");
-      return;
-    }
-
-    let handles: any[] | null = null;
-    try {
-      // 关键极简配置：必须在手势第一瞬间直接调起，不设严苛 MIME，确保 Windows 文件对话框 100% 正常弹起并显示所有格式
-      const pickerOptions: any = {
-        multiple: false
-      };
-      handles = await (window as any).showOpenFilePicker(pickerOptions);
-    } catch (e: any) {
-      if (e?.name === 'AbortError') {
-        reportClientLog('info', 'BindHandle', '用户关闭了选择文件窗口');
-        toast.info("已关闭文件选择窗口", {
-          description: "若您电脑本地尚无该文件，可先点击右侧「下载副本」到本地后再绑定：",
-          action: {
-            label: "立即下载副本",
-            onClick: () => {
-              void executeExport(suggestedName, false, true);
-            }
-          },
-          duration: 9000
-        });
-        return;
-      }
-      reportClientLog('error', 'BindHandle', `showOpenFilePicker 异常: ${e?.message}`, null, e?.stack);
-      alert(`【调起文件窗口异常】
-类型: ${e?.name}
-原因: ${e?.message}`);
-      return;
-    }
-
-    if (!handles || !handles[0]) return;
-    const handle = handles[0];
-    reportClientLog('info', 'BindHandle', `用户已选中本地文件: ${handle.name}，开始授权与写入...`);
-
-    const toastId = toast.loading(`正在写入并绑定文件句柄：${handle.name}...`);
-    try {
-      // 复用完整的 silentSaveWithHandle：自动请求写权限、自动写入数据并处理超时
-      const res = await silentSaveWithHandle(handle, { silentToast: true });
-      toast.dismiss(toastId);
-
-      if (res.ok) {
-        toast.success(`文件句柄已成功提交并绑定：${handle.name}！后续保存将直接原地更新。`);
-        reportClientLog('info', 'BindHandle', `成功完成本地句柄绑定与写入: ${handle.name}`);
-        await loadHistoryList();
-        return;
-      }
-
-      reportClientLog('warn', 'BindHandle', `句柄写入未成功: ${res.message}`);
-      alert(`【绑定受限】未能向该文件写入数据：
-${res.message || '请检查该文件是否被其他程序占用'}`);
-    } catch (err: any) {
-      toast.dismiss(toastId);
-      reportClientLog('error', 'BindHandle', `写入过程发生未捕获异常: ${err?.message}`, null, err?.stack);
-      alert(`【系统异常】写入本地文件失败：
-${err?.message}`);
-    }
+  const openBindHelperDialog = (
+    mode: 'bind' | 'save_abort',
+    targetItem: any = null,
+    suggestedName = ""
+  ) => {
+    setBindHelperMode(mode);
+    setBindHelperTargetItem(targetItem);
+    setBindHelperSuggestedName(suggestedName || targetItem?.name || getDefaultFileName(false));
+    setBindHelperDroppedHandle(null);
+    setBindHelperDragOver(false);
+    setBindHelperSubmitting(false);
+    setBindHelperOpen(true);
   };
 
-  const bindCachedItemToLocalFile = async (item: any) => {
-    reportClientLog('info', 'BindCached', `用户触发对缓存项绑定文件: ${item.name}`);
-    if (!canUseNativeFilePicker) {
-      alert("当前浏览器环境未开放文件句柄权限");
-      return;
-    }
-
-    let handles: any[] | null = null;
+  // 将任意有效的 FileSystemFileHandle 写入并绑定（供原生 Picker 与拖放绑定共用）
+  const writeAndBindHandleToTarget = async (
+    handle: any,
+    targetItem: any = null,
+    options?: { skipPermissionCheck?: boolean }
+  ): Promise<boolean> => {
+    if (!handle) return false;
+    const toastId = toast.loading(`正在向本地文件写入并绑定句柄：${handle.name}...`);
     try {
-      handles = await (window as any).showOpenFilePicker({ multiple: false });
-    } catch (e: any) {
-      if (e?.name === 'AbortError') return;
-      alert(`调起文件窗口受限：${e?.message}`);
-      return;
-    }
+      if (!targetItem) {
+        const res = await silentSaveWithHandle(handle, {
+          skipPermissionCheck: options?.skipPermissionCheck,
+          silentToast: true
+        });
+        toast.dismiss(toastId);
+        if (res.ok) {
+          toast.success(`文件句柄绑定成功：${handle.name}（以后保存将直接原地更新）`);
+          reportClientLog('info', 'BindHandle', `成功完成本地句柄绑定与写入: ${handle.name}`);
+          await loadHistoryList();
+          return true;
+        }
+        reportClientLog('warn', 'BindHandle', `句柄写入未成功: ${res.message}`);
+        if (res.reason !== 'permission_denied') {
+          alert(`【绑定受限】未能向该文件写入数据：\n${res.message || '请检查该文件是否被其他程序占用'}`);
+        }
+        return false;
+      }
 
-    if (!handles || !handles[0]) return;
-    const handle = handles[0];
+      // 升级缓存历史项：直接向选中/拖入句柄写入该历史项数据
+      const isEng = (targetItem.data && (Array.isArray(targetItem.data.purchases) || Array.isArray(targetItem.data.savedPlans)))
+        || String(targetItem.name || '').endsWith('.wce');
 
-    const toastId = toast.loading(`正在向本地文件写入缓存数据：${handle.name}...`);
-    try {
-      const isEng = (item.data && (Array.isArray(item.data.purchases) || Array.isArray(item.data.savedPlans))) || item.name.endsWith('.wce');
-      
-      // 检查并申请写权限
-      if (typeof handle.queryPermission === 'function') {
+      if (!options?.skipPermissionCheck && typeof handle.queryPermission === 'function') {
         let perm = await handle.queryPermission({ mode: 'readwrite' });
         if (perm !== 'granted' && typeof handle.requestPermission === 'function') {
           perm = await handle.requestPermission({ mode: 'readwrite' });
         }
         if (perm !== 'granted') {
           toast.dismiss(toastId);
-          alert("未获得对该本地文件的写入授权，无法绑定");
-          return;
+          alert("未获得对该本地文件的写入授权（请在浏览器顶部弹出的确认框中点击“允许/保存更改”）");
+          return false;
         }
       }
 
-      const dataToWrite = item.data || buildCurrentProjectData();
+      const dataToWrite = targetItem.data || buildCurrentProjectData();
       const jsonText = JSON.stringify(dataToWrite, null, 2);
       const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
-      const writable = await handle.createWritable({ keepExistingData: false });
-      await writable.write(blob);
-      await writable.close();
+      const writable = await withSaveTimeout(handle.createWritable({ keepExistingData: false }), '打开文件写入流', 8000);
+      await withSaveTimeout(writable.write(blob), '写入文件', 15000);
+      await withSaveTimeout(writable.close(), '提交文件保存', 15000);
 
-      // 升级历史记录
-      await saveToHistory(handle.name, dataToWrite, item.name, handle, isEng ? 'engineering' : 'optimization');
-      
-      // 若当前正打开该项目，立即激活句柄
+      await saveToHistory(handle.name, dataToWrite, targetItem.name, handle, isEng ? 'engineering' : 'optimization');
+
       const currentName = isEng ? currentProjectName : currentOptimizationName;
-      if (currentName && (currentName === item.name.replace(/\.[^/.]+$/, "") || currentName === handle.name.replace(/\.[^/.]+$/, ""))) {
+      if (
+        currentName &&
+        (currentName === String(targetItem.name || '').replace(/\.[^/.]+$/, "")
+          || currentName === handle.name.replace(/\.[^/.]+$/, ""))
+      ) {
         if (isEng) {
           updateProjectHandle(handle);
           setCurrentProjectName(handle.name.replace(/\.[^/.]+$/, ""));
@@ -991,12 +959,56 @@ ${err?.message}`);
       toast.dismiss(toastId);
       toast.success(`文件句柄提交成功！历史记录已升级为本地文件：${handle.name}`);
       reportClientLog('info', 'BindCached', `成功升级历史记录为本地文件: ${handle.name}`);
+      return true;
     } catch (err: any) {
       toast.dismiss(toastId);
-      reportClientLog('error', 'BindCached', `写入失败: ${err?.message}`, null, err?.stack);
-      alert(`写入本地文件失败：
-${err?.message}`);
+      reportClientLog('error', 'BindHandle', `写入过程异常: ${err?.message}`, null, err?.stack);
+      alert(`写入本地文件失败：\n${err?.message}`);
+      return false;
     }
+  };
+
+  // 直接通过 showOpenFilePicker 选择并绑定已有文件（必须保持在点击事件同步调用链顶部）
+  const pickExistingFileDirectly = async (targetItem: any = null, openHelperOnAbort = true) => {
+    if (!canUseNativeFilePicker) {
+      alert("当前浏览器环境未开放文件句柄权限（请确保在 Chrome/Edge 中且使用 https:// 独立标签页访问）");
+      return false;
+    }
+
+    const startTime = Date.now();
+    let handles: any[] | null = null;
+    try {
+      // 极简配置，不加 MIME/扩展名限制，直接调起原生选择框
+      handles = await (window as any).showOpenFilePicker({ multiple: false });
+    } catch (e: any) {
+      const elapsed = Date.now() - startTime;
+      const errName = e?.name || '';
+      const errMsg = e?.message || '';
+      if (errName === 'AbortError') {
+        reportClientLog(
+          'warn',
+          targetItem ? 'BindCached' : 'BindHandle',
+          `showOpenFilePicker 返回 AbortError (耗时 ${elapsed}ms, visibility=${document.visibilityState}, win=${window.innerWidth}x${window.innerHeight})`
+        );
+        if (openHelperOnAbort) {
+          openBindHelperDialog('bind', targetItem, targetItem?.name || getDefaultFileName(false));
+        }
+        return false;
+      }
+      reportClientLog('error', 'BindHandle', `showOpenFilePicker 异常: ${errMsg}`, null, e?.stack);
+      alert(`【调起文件窗口异常】\n类型: ${errName}\n原因: ${errMsg}`);
+      return false;
+    }
+
+    if (!handles || !handles[0]) return false;
+    const ok = await writeAndBindHandleToTarget(handles[0], targetItem);
+    if (ok) setBindHelperOpen(false);
+    return ok;
+  };
+
+  const bindCachedItemToLocalFile = async (item: any) => {
+    reportClientLog('info', 'BindCached', `用户触发对缓存项绑定文件: ${item.name}`);
+    await pickExistingFileDirectly(item, true);
   };
 
   const deleteHistoryItem = async (itemId: string, e: React.MouseEvent) => {
@@ -1200,13 +1212,13 @@ ${err?.message}`);
     reportClientLog('info', 'SilentSave', `开始写入本地文件句柄: ${handle?.name || '未知文件'}`);
     try {
       if (!options?.skipPermissionCheck && typeof handle.queryPermission === 'function') {
-        let perm = await withSaveTimeout(handle.queryPermission({ mode: 'readwrite' }), '检查文件权限', 5000);
+        let perm = await handle.queryPermission({ mode: 'readwrite' });
         if (perm !== 'granted' && typeof handle.requestPermission === 'function') {
-          perm = await withSaveTimeout(handle.requestPermission({ mode: 'readwrite' }), '申请文件权限', 8000);
+          perm = await handle.requestPermission({ mode: 'readwrite' });
         }
         if (perm !== 'granted') {
           reportClientLog('warn', 'SilentSave', `未获得本地文件写入权限: ${handle?.name}`);
-          alert(`【保存受限】未获得本地文件写入权限（${handle?.name || '未知文件'}）`);
+          alert(`【保存受限】未获得本地文件写入权限（${handle?.name || '未知文件'}），请在浏览器地址栏下方弹出的授权提示中允许编辑文件。`);
           return { ok: false, reason: 'permission_denied', message: '未授予本地文件写入权限' };
         }
       }
@@ -1257,12 +1269,13 @@ ${err?.message}`);
         setSavedOptRev(optRev);
       }
 
-      // 异步存储到历史记录，绝不阻塞本地文件已保存的成功反馈
-      void saveToHistory(safeName, projectData, oldName, handle).then(() => {
+      // 等待历史记录写入 IndexedDB，确保随后刷新历史列表能立即看到绿色“本地文件”标识
+      try {
+        await saveToHistory(safeName, projectData, oldName, handle);
         reportClientLog('info', 'SilentSave', `历史记录更新成功: ${safeName}`);
-      }).catch((histErr) => {
+      } catch (histErr: any) {
         reportClientLog('warn', 'SilentSave', `历史记录更新失败（不影响本地文件已保存）: ${histErr?.message}`);
-      });
+      }
 
       return { ok: true };
     } catch (err: any) {
@@ -1300,6 +1313,7 @@ ${err?.message}`);
     }
 
     let handle: any = null;
+    const pickerStartTime = Date.now();
 
     try {
       // 必须保持最纯净的同步调用链直接调起，严禁在调起前插入异步网络请求避免消耗用户手势！
@@ -1317,23 +1331,18 @@ ${err?.message}`);
       };
       handle = await (window as any).showSaveFilePicker(pickerOptions);
     } catch (e: any) {
+      const elapsed = Date.now() - pickerStartTime;
       const errName = e?.name || '';
       const errMsg = e?.message || '';
-      reportClientLog('warn', 'PickAndSave', `showSaveFilePicker 结果: ${errName} - ${errMsg}`);
+      reportClientLog(
+        'warn',
+        'PickAndSave',
+        `showSaveFilePicker 结果: ${errName} - ${errMsg} (耗时 ${elapsed}ms, visibility=${document.visibilityState}, win=${window.innerWidth}x${window.innerHeight})`
+      );
 
       if (errName === 'AbortError') {
-        // 关键体验守护：部分 Windows/Chromium 覆盖同名文件或系统失焦时会自动抛出 AbortError。
-        // 若用户点击了保存却被浏览器异常中止，提供一键直接下载操作，彻底杜绝“没反应”！
-        toast.info("保存窗口已关闭", {
-          description: "若您刚才已在窗口中点击保存（覆盖同名文件），请点击右侧直接绑定句柄：",
-          action: {
-            label: "选择已有文件绑定",
-            onClick: () => {
-              void handleBindExistingLocalFile();
-            }
-          },
-          duration: 12000
-        });
+        // 打开救场/拖放绑定助手弹窗（不丢失用户手势，提供改名另存、下载副本、拖放绑定）
+        openBindHelperDialog('save_abort', null, suggestedName);
         return 'cancelled';
       }
 
@@ -1354,6 +1363,7 @@ ${err?.message}`);
 
       if (res.ok) {
         setConfirmExportOpen(false);
+        setBindHelperOpen(false);
         toast.success(`保存成功，已绑定本地文件：${handle.name}`);
         reportClientLog('info', 'PickAndSave', `保存并绑定成功: ${handle.name}`);
         // 立即刷新历史记录列表，确保弹窗中同步显示为绿色“本地文件”
@@ -1837,6 +1847,7 @@ ${err?.message}`);
     }
 
     let handles: any[] | null = null;
+    const openStartTime = Date.now();
     try {
       // 不给原生选择器设置 MIME/扩展名过滤。
       // Android Chrome 对自定义 .wce 扩展名配合 application/json 的过滤兼容性不一致，
@@ -1848,6 +1859,22 @@ ${err?.message}`);
       handles = await (window as any).showOpenFilePicker(pickerOptions);
     } catch (e: any) {
       if (e?.name === 'AbortError') {
+        const elapsed = Date.now() - openStartTime;
+        reportClientLog(
+          'warn',
+          'ImportOpen',
+          `showOpenFilePicker 返回 AbortError (耗时 ${elapsed}ms, visibility=${document.visibilityState}, win=${window.innerWidth}x${window.innerHeight})`
+        );
+        if (elapsed >= 1500) {
+          toast.info("未获取到文件", {
+            description: "如已选文件点确认却无反应，通常是窗口被遮挡被 Chrome 拦截，可直接把本地文件拖进此弹窗导入（带句柄）或用标准导入：",
+            action: {
+              label: "标准导入",
+              onClick: () => triggerFallbackFileInput()
+            },
+            duration: 10000
+          });
+        }
         return;
       }
       console.warn("showOpenFilePicker 出现异常:", e);
@@ -2044,7 +2071,38 @@ ${err?.message}`);
   }
 
   return (
-    <div className="min-h-screen bg-[#F5F5F4] text-[#1A1A1A] font-sans selection:bg-orange-100 selection:text-orange-900">
+    <div
+      className="min-h-screen bg-[#F5F5F4] text-[#1A1A1A] font-sans selection:bg-orange-100 selection:text-orange-900"
+      onDragOver={(e) => {
+        if (e.dataTransfer?.types?.includes('Files')) {
+          e.preventDefault();
+        }
+      }}
+      onDrop={async (e) => {
+        if (bindHelperOpen || historyFolderOpen) return;
+        const firstItem = e.dataTransfer?.items?.[0] as any;
+        const droppedFile = e.dataTransfer?.files?.[0];
+        if (!firstItem && !droppedFile) return;
+        e.preventDefault();
+        const handlePromise =
+          firstItem && typeof firstItem.getAsFileSystemHandle === 'function'
+            ? firstItem.getAsFileSystemHandle().catch(() => null)
+            : null;
+        if (handlePromise) {
+          const handle = await handlePromise;
+          if (handle && handle.kind === 'file') {
+            try {
+              const file = await handle.getFile();
+              await queueOrExecuteImport(file, handle);
+              return;
+            } catch (_) {}
+          }
+        }
+        if (droppedFile) {
+          await queueOrExecuteImport(droppedFile, null);
+        }
+      }}
+    >
       <input
         type="file"
         ref={fileInputRef}
@@ -2321,6 +2379,197 @@ ${err?.message}`);
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={bindHelperOpen}
+        onOpenChange={(open) => {
+          setBindHelperOpen(open);
+          if (!open) {
+            setBindHelperDroppedHandle(null);
+            setBindHelperTargetItem(null);
+            setBindHelperDragOver(false);
+            setBindHelperSubmitting(false);
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Link2 className="h-5 w-5 text-orange-600" />
+              {bindHelperMode === 'save_abort' ? '保存窗口被浏览器中断 — 替代方案' : '绑定本地文件句柄'}
+            </DialogTitle>
+            <DialogDescription className="text-xs leading-relaxed text-black/70">
+              Windows 版 Chrome 若弹出文件框较大且遮住了网页，或保存时覆盖同名文件，浏览器安全策略会自动取消并返回失败（<code className="bg-black/5 px-1 rounded">AbortError</code>）。
+              <br />
+              您可以<strong>先把浏览器最大化 / 把系统保存框拖小一点重试</strong>，或使用下方<strong>免弹窗拖放区</strong>直接把本地文件拖进来完成句柄绑定：
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 py-1">
+            {bindHelperTargetItem && (
+              <div className="rounded-md bg-orange-50 border border-orange-200 px-3 py-2 text-xs text-orange-900">
+                当前待绑定缓存记录：<strong className="font-semibold">{bindHelperTargetItem.name}</strong>
+              </div>
+            )}
+
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setBindHelperDragOver(true);
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setBindHelperDragOver(false);
+              }}
+              onDrop={async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setBindHelperDragOver(false);
+                const firstItem = e.dataTransfer?.items?.[0] as any;
+                if (!firstItem || typeof firstItem.getAsFileSystemHandle !== 'function') {
+                  toast.error("当前浏览器不支持拖放获取文件句柄，请使用最新版 Chrome 或 Edge");
+                  return;
+                }
+                try {
+                  const handle = await firstItem.getAsFileSystemHandle();
+                  if (!handle || handle.kind !== 'file') {
+                    toast.error("请拖入单个文件，不要拖入文件夹");
+                    return;
+                  }
+                  setBindHelperDroppedHandle(handle);
+                  reportClientLog('info', 'BindHelper', `拖放捕获文件句柄成功: ${handle.name}`);
+                  toast.success(`已捕获文件：${handle.name}，请点击下方「确认授权写入并绑定」`);
+                } catch (err: any) {
+                  reportClientLog('warn', 'BindHelper', `拖放获取句柄异常: ${err?.message}`);
+                  toast.error(`读取拖入文件失败：${err?.message || '请重试'}`);
+                }
+              }}
+              className={cn(
+                "rounded-xl border-2 border-dashed p-5 text-center transition-colors",
+                bindHelperDroppedHandle
+                  ? "border-emerald-400 bg-emerald-50/70"
+                  : bindHelperDragOver
+                    ? "border-orange-500 bg-orange-50"
+                    : "border-black/20 bg-black/[0.02] hover:border-orange-400"
+              )}
+            >
+              {bindHelperDroppedHandle ? (
+                <div className="space-y-2">
+                  <div className="inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-800">
+                    <Check className="h-4 w-4 text-emerald-600" />
+                    已识别本地文件：{bindHelperDroppedHandle.name}
+                  </div>
+                  <p className="text-xs text-emerald-700/90">
+                    点击下方按钮后，浏览器顶部若弹出「允许编辑文件」，请点允许，数据将直接覆盖写入该文件并永久绑定句柄。
+                  </p>
+                  <div className="pt-1 flex items-center justify-center gap-2">
+                    <Button
+                      size="sm"
+                      disabled={bindHelperSubmitting}
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white gap-1.5"
+                      onClick={async () => {
+                        if (!bindHelperDroppedHandle) return;
+                        setBindHelperSubmitting(true);
+                        try {
+                          const ok = await writeAndBindHandleToTarget(
+                            bindHelperDroppedHandle,
+                            bindHelperTargetItem
+                          );
+                          if (ok) {
+                            setBindHelperOpen(false);
+                          }
+                        } finally {
+                          setBindHelperSubmitting(false);
+                        }
+                      }}
+                    >
+                      <Check className="h-4 w-4" />
+                      {bindHelperSubmitting ? '正在写入绑定...' : '确认授权写入并绑定'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setBindHelperDroppedHandle(null)}
+                    >
+                      重选
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <Upload className="h-7 w-7 mx-auto text-orange-500/80" />
+                  <p className="text-sm font-medium text-black/80">
+                    将电脑里的 <code className="bg-black/5 px-1 rounded">.json</code> / <code className="bg-black/5 px-1 rounded">.wce</code> 文件直接拖到这里
+                  </p>
+                  <p className="text-xs text-black/50">
+                    完全绕过系统文件弹窗限制。如果本地还没有文件，可先点下方「下载副本」，再把刚下载的文件拖进此框即可绑定！
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="flex flex-col sm:flex-row flex-wrap gap-2 mt-2">
+            <Button variant="outline" size="sm" onClick={() => setBindHelperOpen(false)}>
+              关闭
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => {
+                const name = bindHelperSuggestedName || getDefaultFileName(false);
+                if (bindHelperTargetItem?.data) {
+                  const ok = triggerBrowserDownload(
+                    JSON.stringify(bindHelperTargetItem.data, null, 2),
+                    name
+                  );
+                  if (ok) {
+                    toast.success(`已下载：${name}，直接从浏览器下载栏或文件夹拖入上方虚线框即可绑定！`);
+                  }
+                } else {
+                  void executeExport(name, false, true);
+                }
+              }}
+            >
+              <Download className="h-3.5 w-3.5" />
+              下载副本到电脑
+            </Button>
+            {bindHelperMode === 'save_abort' && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5 border-orange-300 text-orange-700 hover:bg-orange-50"
+                onClick={() => {
+                  const base = (bindHelperSuggestedName || getDefaultFileName(false)).replace(/\.(json|wce)$/i, '');
+                  const ext = mainMode === 'engineering' ? '.wce' : '.json';
+                  const stamp = new Date().toTimeString().slice(0, 8).replace(/:/g, '');
+                  void pickAndSaveWithNativePicker(true, `${base}_${stamp}${ext}`);
+                }}
+              >
+                <Save className="h-3.5 w-3.5" />
+                换新文件名另存
+              </Button>
+            )}
+            <Button
+              size="sm"
+              className="bg-orange-600 hover:bg-orange-700 text-white gap-1.5"
+              onClick={() => {
+                if (bindHelperMode === 'save_abort') {
+                  void pickAndSaveWithNativePicker(false, bindHelperSuggestedName);
+                } else {
+                  void pickExistingFileDirectly(bindHelperTargetItem, false);
+                }
+              }}
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              {bindHelperMode === 'save_abort' ? '再试一次另存为' : '用系统窗口选择'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={Boolean(reenterOptimizationPlan)} onOpenChange={(open) => !open && setReenterOptimizationPlan(null)}>
         <DialogContent>
           <DialogHeader>
@@ -2415,18 +2664,6 @@ ${err?.message}`);
                 <Upload className="h-4 w-4" />
                 {mainMode === 'engineering' ? '导入工程' : '导入套裁'}
               </Button>
-              {((mainMode === 'engineering' && !currentProjectHandle) || (mainMode === 'optimization' && !currentOptimizationHandle)) && canUseNativeFilePicker && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5 text-xs text-orange-600 border-orange-300 bg-orange-50 hover:bg-orange-100 hover:text-orange-700"
-                  onClick={handleBindExistingLocalFile}
-                  title="选择本地已有文件（如已下载的同名副本），直接覆盖并提交本地物理句柄，永久开启原地自动保存"
-                >
-                  <Link2 className="h-3.5 w-3.5" />
-                  绑定本地文件
-                </Button>
-              )}
               <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleExportProject}>
                 <Save className="h-4 w-4" />
                 {mainMode === 'engineering' ? '保存工程' : '保存套裁'}
