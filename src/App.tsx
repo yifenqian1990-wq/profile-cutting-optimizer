@@ -649,6 +649,7 @@ export default function App() {
   const [exportFileName, setExportFileName] = useState("");
   const [isSaveAsExport, setIsSaveAsExport] = useState(false);
   const [confirmNewProjectOpen, setConfirmNewProjectOpen] = useState(false);
+  const [reenterOptimizationPlan, setReenterOptimizationPlan] = useState<SavedPlan | null>(null);
   const [historyFolderOpen, setHistoryFolderOpen] = useState(false);
   const [historyList, setHistoryList] = useState<any[]>([]);
   const [pasteImportOpen, setPasteImportOpen] = useState(false);
@@ -974,11 +975,30 @@ export default function App() {
       }
 
       setConfirmExportOpen(false);
+      toast.success(`文件已下载：${safeName}`, {
+        description: '请在浏览器下载目录中查看文件；普通导入的原文件不会被自动覆盖。'
+      });
       return true;
     } catch (err: any) {
       console.error("Export failed:", err);
       toast.error(`保存文件失败：${err?.message || '数据序列化或下载异常'}`);
       return false;
+    }
+  };
+
+  const withSaveTimeout = async <T,>(operation: Promise<T>, label: string, timeoutMs = 12000): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await new Promise<T>((resolve, reject) => {
+        timer = setTimeout(() => {
+          const timeoutError: any = new Error(`${label}超时，请改用下载副本`);
+          timeoutError.name = 'TimeoutError';
+          reject(timeoutError);
+        }, timeoutMs);
+        operation.then(resolve, reject);
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   };
 
@@ -989,12 +1009,11 @@ export default function App() {
     let writable: any = null;
     try {
       if (!options?.skipPermissionCheck && typeof handle.queryPermission === 'function') {
-        let perm = await handle.queryPermission({ mode: 'readwrite' });
+        let perm = await withSaveTimeout(handle.queryPermission({ mode: 'readwrite' }), '检查文件权限');
         if (perm !== 'granted' && typeof handle.requestPermission === 'function') {
-          perm = await handle.requestPermission({ mode: 'readwrite' });
+          perm = await withSaveTimeout(handle.requestPermission({ mode: 'readwrite' }), '申请文件权限');
         }
         if (perm !== 'granted') {
-          alert(`【保存受限】未获得本地文件写入权限（${handle?.name || '未知文件'}）`);
           return { ok: false, reason: 'permission_denied', message: '未授予本地文件写入权限' };
         }
       }
@@ -1003,33 +1022,30 @@ export default function App() {
       const jsonText = JSON.stringify(projectData, null, 2);
 
       try {
-        writable = await handle.createWritable();
+        writable = await withSaveTimeout(handle.createWritable(), '打开文件写入流');
       } catch (cwErr: any) {
         console.error("createWritable 失败:", cwErr);
-        alert(`【保存失败诊断】打开文件流失败：\n类型: ${cwErr?.name}\n原因: ${cwErr?.message}`);
         throw cwErr;
       }
 
       try {
-        await writable.write(jsonText);
+        await withSaveTimeout(writable.write(jsonText), '写入文件');
       } catch (wErr: any) {
         console.error("writable.write 失败:", wErr);
-        alert(`【保存失败诊断】写入数据失败：\n类型: ${wErr?.name}\n原因: ${wErr?.message}`);
         throw wErr;
       }
 
       try {
-        await writable.close();
+        await withSaveTimeout(writable.close(), '提交文件保存');
         writable = null;
       } catch (clErr: any) {
         console.error("writable.close 失败:", clErr);
-        alert(`【保存失败诊断】提交保存失败：\n类型: ${clErr?.name}\n原因: ${clErr?.message}`);
         throw clErr;
       }
 
       const safeName = handle.name || getDefaultFileName(false);
       const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
-      await saveToHistory(safeName, projectData, oldName, handle);
+      await withSaveTimeout(saveToHistory(safeName, projectData, oldName, handle), '保存本地历史记录');
 
       if (mainMode === 'engineering') {
         setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
@@ -1049,7 +1065,6 @@ export default function App() {
         } catch (_) {}
       }
       console.error("Silent save to handle failed:", err);
-      alert(`【底层写入流异常诊断】\n错误类型: ${err?.name}\n详细原因: ${err?.message}\n请检查文件是否被其他程序占用或权限受限！`);
       if (err?.name === 'NotAllowedError' || err?.name === 'SecurityError') {
         return { ok: false, reason: 'permission_denied', message: err?.message || '文件写入权限被拒绝' };
       }
@@ -1083,14 +1098,13 @@ export default function App() {
       const pickerOptions: any = {
         suggestedName
       };
-      if (isSaveAs && currentHandle && typeof currentHandle.getFile === 'function') {
-        pickerOptions.startIn = currentHandle;
-      }
+      // Android Chrome 对 FileSystemFileHandle 作为 startIn 的兼容性不一致，
+      // 尤其是优化项目的 JSON 另存为可能直接拒绝打开保存窗口。另存为不依赖旧句柄，
+      // 让系统选择器使用默认目录；普通保存仍直接写入已有句柄。
       handle = await (window as any).showSaveFilePicker(pickerOptions);
     } catch (e: any) {
       if (e?.name === 'AbortError') return 'cancelled';
       console.warn("showSaveFilePicker 异常，降级直接下载:", e);
-      alert(`【调起系统保存窗口异常】\n类型: ${e?.name}\n原因: ${e?.message}`);
       toast.error(`调起保存窗口受限（${e?.message || '请检查权限'}），已为您直接下载副本`);
       await executeExport(suggestedName, isSaveAs, true);
       return 'downloaded';
@@ -1098,6 +1112,7 @@ export default function App() {
 
     if (!handle) return 'cancelled';
 
+    // 关键修复：通过 showSaveFilePicker 获得的句柄已获用户保存授权，跳过二次权限检查避免手势失效抛错
     const res = await silentSaveWithHandle(handle, { skipPermissionCheck: true, silentToast: true });
     if (res.ok) {
       setConfirmExportOpen(false);
@@ -1135,20 +1150,19 @@ export default function App() {
       return;
     }
 
-    // 仅缓存/普通文件导入没有真实本地句柄：首次保存时选择一次本地文件并绑定句柄。
+    // 关键修复：未绑定句柄（新建工程、仅缓存项恢复、或普通文件导入），首次保存调起原生保存窗口以获取本地文件句柄
     const cachedName = mainMode === 'engineering'
       ? currentProjectName
       : currentOptimizationName;
-    if (cachedName) {
-      const cachedExt = mainMode === 'engineering' ? '.wce' : '.json';
-      await pickAndSaveWithNativePicker(false, ensureFileExtension(cachedName, cachedExt));
-      return;
-    }
-    // 全新工程同样调起原生保存框，保存后立即绑定句柄。
-    await pickAndSaveWithNativePicker(false);
+    const cachedExt = mainMode === 'engineering' ? '.wce' : '.json';
+    await pickAndSaveWithNativePicker(
+      false,
+      cachedName ? ensureFileExtension(cachedName, cachedExt) : undefined
+    );
   };
 
   const handleSaveAsProject = async () => {
+    // 关键修复：另存为必须调起原生选择器，以创建新文件并绑定新句柄
     await pickAndSaveWithNativePicker(true);
   };
 
@@ -1324,11 +1338,14 @@ export default function App() {
       updateOptimizationHandle(pendingHandle || null);
     }
 
-    try {
-      await saveToHistory(fileName, data, "", pendingHandle || null);
-    } catch (e) {
+    // 历史缓存不是导入成功的前置条件；句柄缓存异常不能阻塞页面完成导入。
+    void withSaveTimeout(
+      saveToHistory(fileName, data, "", pendingHandle || null),
+      '保存导入历史记录',
+      3000
+    ).catch((e) => {
       console.warn("saveToHistory after import failed:", e);
-    }
+    });
     return true;
   };
 
@@ -1336,7 +1353,7 @@ export default function App() {
     // CRITICAL: read and parse the File immediately BEFORE clearing input.value or switching modal state
     const parsed = await parseImportedFileData(file);
     if (!parsed.ok || !parsed.data) {
-      return;
+      return false;
     }
 
     const ok = await applyImportedParsedData(parsed.data, parsed.fileName, handle);
@@ -1351,6 +1368,7 @@ export default function App() {
       if (fileInputRef.current) fileInputRef.current.value = '';
       if (dialogFileInputRef.current) dialogFileInputRef.current.value = '';
     }
+    return ok;
   };
 
   const executeImport = async () => {
@@ -1570,18 +1588,10 @@ export default function App() {
 
     let handles: any[] | null = null;
     try {
-      const pickerOptions: any = {
-        multiple: false,
-        types: [
-          {
-            description: '工程文件或套裁文件',
-            accept: {
-              'application/json': ['.wce', '.json']
-            }
-          }
-        ],
-        excludeAcceptAllOption: false
-      };
+      // 不给原生选择器设置 MIME/扩展名过滤。
+      // Android Chrome 对自定义 .wce 扩展名配合 application/json 的过滤兼容性不一致，
+      // 选中文件后再按 JSON 内容识别工程或套裁类型。
+      const pickerOptions: any = { multiple: false };
       if (startInHandle && typeof startInHandle.getFile === 'function') {
         pickerOptions.startIn = startInHandle;
       }
@@ -1597,27 +1607,31 @@ export default function App() {
     }
 
     if (handles && handles[0]) {
+      const handle = handles[0];
       try {
-        const handle = handles[0];
-        const file = await handle.getFile();
-        await queueOrExecuteImport(file, handle);
+        // 这里只读取并绑定句柄，不在选择器返回后立即申请 readwrite。
+        // Chrome 可能已结束用户手势，此时申请写权限会被拦截；保存按钮中再申请写权限。
+        const file = await withSaveTimeout(handle.getFile(), '读取导入文件');
+        const imported = await queueOrExecuteImport(file, handle);
+        if (!imported) {
+          toast.warning('原生导入未完成，已切换为标准文件导入');
+          triggerFallbackFileInput();
+        }
         return;
       } catch (fileErr: any) {
         console.error("Failed to read selected file from handle:", fileErr);
-        toast.error(`读取本地文件失败：${fileErr?.message || '请确认文件可读'}`);
+        toast.warning(`原生句柄读取失败，已切换为标准文件导入：${fileErr?.message || '请确认文件可读'}`);
+        triggerFallbackFileInput();
         return;
       }
     }
   };
 
   const handleImportFromLocalFileInDialog = async () => {
-    if (canUseNativeFilePicker) {
-      await openLocalProjectWithHandle();
-      return;
-    }
-    triggerFallbackFileInput();
+    // 优先使用原生文件选择器，保留 FileSystemFileHandle，后续保存可直接覆盖原文件。
+    // 仅在浏览器不支持原生 API 或调用失败时，才降级到普通 input 导入。
+    await openLocalProjectWithHandle();
   };
-
   const importFromLocalFile = openLocalProjectWithHandle;
 
   const handleDeletePlan = useCallback((planId: string, revokeRelated: boolean) => {
@@ -1671,6 +1685,43 @@ export default function App() {
     }));
   }, [savedPlans]);
 
+  const applySavedPlanToOptimization = (plan: SavedPlan) => {
+    setResults(plan.results);
+    if (plan.settingsSnapshot && typeof plan.settingsSnapshot === 'object') {
+      setSettings(prev => ({ ...prev, ...plan.settingsSnapshot, ai: prev.ai }));
+    }
+    setMainMode('optimization');
+    setActiveOptTab('results');
+    setCurrentOptimizationName(plan.name);
+    updateOptimizationHandle(null);
+    setSavedOptRev(0);
+    setReenterOptimizationPlan(null);
+    toast.success(`已重新进入优化项目：${plan.name}`);
+  };
+  const handleRequestReenterOptimization = useCallback((plan: SavedPlan) => {
+    setReenterOptimizationPlan(plan);
+  }, []);
+  const handleSaveCurrentAndReenter = async () => {
+    const plan = reenterOptimizationPlan;
+    if (!plan) return;
+    const existingHandle = optimizationHandleRef.current;
+    if (existingHandle) {
+      const res = await silentSaveWithHandle(existingHandle);
+      if (res.ok) {
+        applySavedPlanToOptimization(plan);
+        return;
+      }
+    }
+    const status = await pickAndSaveWithNativePicker(false);
+    if (status === 'saved' || status === 'downloaded') {
+      applySavedPlanToOptimization(plan);
+    }
+  };
+  const handleOverwriteAndReenter = () => {
+    if (reenterOptimizationPlan) {
+      applySavedPlanToOptimization(reenterOptimizationPlan);
+    }
+  };
   const handleSaleFromPlan = useCallback((planId: string) => {
     setPendingSalePlanIds([planId]);
     setMainMode('engineering');
@@ -2004,6 +2055,24 @@ export default function App() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={Boolean(reenterOptimizationPlan)} onOpenChange={(open) => !open && setReenterOptimizationPlan(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>重新进入优化项目</DialogTitle>
+            <DialogDescription>
+              即将加载套裁单 <strong className="text-orange-600">“{reenterOptimizationPlan?.name}”</strong> 的计算结果，
+              这会替换当前优化项目页面中的结果和计算参数。
+              {isOptDirty && <><br /><br /><strong className="text-red-600">当前优化项目有未保存修改。</strong> 如需保留，请先保存后再进入。</>}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setReenterOptimizationPlan(null)}>取消</Button>
+            <Button variant="ghost" className="text-red-600 hover:text-red-700 hover:bg-red-50" onClick={handleOverwriteAndReenter}>直接覆盖进入</Button>
+            <Button onClick={handleSaveCurrentAndReenter} className="bg-orange-600 hover:bg-orange-700 text-white">保存当前并进入</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={confirmNewProjectOpen} onOpenChange={setConfirmNewProjectOpen}>
         <DialogContent>
           <DialogHeader>
@@ -2276,6 +2345,7 @@ export default function App() {
                 onUtilizeOffcuts={handleUtilizeOffcuts}
                 onDeletePlan={handleDeletePlan}
                 onRenamePlan={handleRenamePlan}
+                onReenterOptimization={handleRequestReenterOptimization}
                 settings={settings}
                 isActive={activeTab === 'plan-management'}
               />
