@@ -440,19 +440,27 @@ export function ProfileSalesDialogs({
               </Button>
             )}
             <div className="flex items-center gap-2 flex-wrap justify-end">
-              {sortPriorityDialogData?.planOrderNumbers && sortPriorityDialogData.planOrderNumbers.length > 0 && sortPriorityDialogData?.type !== 'digest' && (
+              {sortPriorityDialogData?.type !== 'digest' && (
                 <Button
                   type="button"
                   variant="outline"
                   onClick={() => {
                     const data = sortPriorityDialogData!;
+                    const hasOrders = (data.planOrderNumbers?.length || 0) > 0;
+                    if (!hasOrders) {
+                      toast.info("当前套裁单未标注具体采购单号（如全为定尺料），将按当前勾选顺序销料");
+                    }
                     setSortPriorityDialogData(null);
-                    onPriorityConfirm(data.planId, data.colId, data.priority, data.checked, data.type, true);
+                    onPriorityConfirm(data.planId, data.colId, data.priority, data.checked, data.type, hasOrders);
                   }}
-                  title={`直接按照套裁单上标注的采购单号（${sortPriorityDialogData.planOrderNumbers.join('、')}）一一对应扣减销料；定尺等未标单号的用料按左侧勾选顺序扣减`}
+                  title={
+                    sortPriorityDialogData?.planOrderNumbers && sortPriorityDialogData.planOrderNumbers.length > 0
+                      ? `直接按照套裁单上标注的采购单号（${sortPriorityDialogData.planOrderNumbers.join('、')}）一一对应扣减销料；定尺等未标单号的用料按左侧勾选顺序扣减`
+                      : "当前套裁单未含具体采购单号（如全为定尺料），点击将按左侧勾选顺序销料"
+                  }
                   className="border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100 hover:text-blue-800"
                 >
-                  按套裁单采购单号销料
+                  按套裁单采购单号销料{sortPriorityDialogData?.planOrderNumbers && sortPriorityDialogData.planOrderNumbers.length > 0 ? ` (${sortPriorityDialogData.planOrderNumbers.length})` : ''}
                 </Button>
               )}
               <Button onClick={() => {

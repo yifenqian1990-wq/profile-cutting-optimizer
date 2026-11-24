@@ -43,7 +43,7 @@ const extractPatternOrderNumber = (summary: ModelColorSummary, pattern: CuttingP
       inside !== '定' &&
       inside !== '库存' &&
       inside !== '库' &&
-      !inside.startsWith('料头') &&
+      inside !== '料头利用' &&
       !inside.startsWith('使用 ') &&
       !inside.startsWith('型号') &&
       !inside.startsWith('颜色')
