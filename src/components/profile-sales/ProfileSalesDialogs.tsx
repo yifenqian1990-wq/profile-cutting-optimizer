@@ -50,12 +50,13 @@ interface ProfileSalesDialogsProps {
     colId?: string; 
     priority: string[]; 
     checked: string[];
+    planOrderNumbers?: string[];
     title?: string;
     description?: string;
     confirmText?: string;
   } | null;
   setSortPriorityDialogData: (data: any) => void;
-  onPriorityConfirm: (planId?: string, colId?: string, priority?: string[], checked?: string[], type?: 'import' | 'refresh' | 'digest') => void;
+  onPriorityConfirm: (planId?: string, colId?: string, priority?: string[], checked?: string[], type?: 'import' | 'refresh' | 'digest', matchPlanOrderNumbers?: boolean) => void;
   onPriorityCancel: (cancelAll?: boolean) => void;
   importQueueLength?: number;
 
@@ -250,7 +251,7 @@ export function ProfileSalesDialogs({
 
       {/* Priority Dialog */}
       <Dialog open={!!sortPriorityDialogData} onOpenChange={(open) => { if (!open) onPriorityCancel(); }}>
-        <DialogContent className="sm:max-w-[480px]">
+        <DialogContent className="sm:max-w-[540px]">
           <DialogHeader>
             <DialogTitle>{sortPriorityDialogData?.title || "选择并排序要销料的单号"}</DialogTitle>
             <DialogDescription>
@@ -259,7 +260,7 @@ export function ProfileSalesDialogs({
           </DialogHeader>
 
           {sortPriorityDialogData && (
-            <div className="flex items-center justify-between pb-2 border-b border-black/5 mt-2">
+            <div className="flex items-center justify-between pb-2 border-b border-black/5 mt-2 gap-2 flex-wrap">
               <div className="flex items-center gap-3">
                 <button 
                   type="button" 
@@ -286,6 +287,29 @@ export function ProfileSalesDialogs({
                 >
                   全不选
                 </button>
+                {sortPriorityDialogData.planOrderNumbers && sortPriorityDialogData.planOrderNumbers.length > 0 && sortPriorityDialogData.type !== 'digest' && (
+                  <>
+                    <span className="text-black/10 text-xs">|</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const planSet = new Set(sortPriorityDialogData.planOrderNumbers || []);
+                        const matchedInPriority = sortPriorityDialogData.priority.filter(p => planSet.has(p));
+                        const others = sortPriorityDialogData.priority.filter(p => !planSet.has(p));
+                        const nextChecked = matchedInPriority.length > 0 ? matchedInPriority : (sortPriorityDialogData.planOrderNumbers || []);
+                        setSortPriorityDialogData({
+                          ...sortPriorityDialogData,
+                          priority: [...matchedInPriority, ...others],
+                          checked: [...nextChecked]
+                        });
+                      }}
+                      title={`套裁单采购单号：${sortPriorityDialogData.planOrderNumbers.join(', ')}`}
+                      className="text-xs text-blue-600 hover:text-blue-700 font-medium cursor-pointer"
+                    >
+                      仅选套裁单号 ({sortPriorityDialogData.planOrderNumbers.length})
+                    </button>
+                  </>
+                )}
               </div>
               <div className="text-xs text-black/40">
                 已勾选 {sortPriorityDialogData.checked.length} / {sortPriorityDialogData.priority.length} 个单号
@@ -415,13 +439,30 @@ export function ProfileSalesDialogs({
                 取消
               </Button>
             )}
-            <Button onClick={() => {
-               const data = sortPriorityDialogData!;
-               setSortPriorityDialogData(null);
-               onPriorityConfirm(data.planId, data.colId, data.priority, data.checked, data.type);
-            }} className="bg-orange-500 text-white hover:bg-orange-600">
-              {sortPriorityDialogData?.confirmText || "确认导入"}
-            </Button>
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              {sortPriorityDialogData?.planOrderNumbers && sortPriorityDialogData.planOrderNumbers.length > 0 && sortPriorityDialogData?.type !== 'digest' && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    const data = sortPriorityDialogData!;
+                    setSortPriorityDialogData(null);
+                    onPriorityConfirm(data.planId, data.colId, data.priority, data.checked, data.type, true);
+                  }}
+                  title={`直接按照套裁单上标注的采购单号（${sortPriorityDialogData.planOrderNumbers.join('、')}）一一对应扣减销料；定尺等未标单号的用料按左侧勾选顺序扣减`}
+                  className="border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100 hover:text-blue-800"
+                >
+                  按套裁单采购单号销料
+                </Button>
+              )}
+              <Button onClick={() => {
+                 const data = sortPriorityDialogData!;
+                 setSortPriorityDialogData(null);
+                 onPriorityConfirm(data.planId, data.colId, data.priority, data.checked, data.type, false);
+              }} className="bg-orange-500 text-white hover:bg-orange-600">
+                {sortPriorityDialogData?.confirmText || "确认导入"}
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>

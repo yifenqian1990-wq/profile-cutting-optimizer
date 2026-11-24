@@ -8,7 +8,7 @@ import {
   FileDown,
   PackageCheck
 } from "lucide-react";
-import { ProfileSalesItem, StockItem, OrderColumn, SavedPlan, PurchaseItem, Settings } from "../lib/optimizer";
+import { ProfileSalesItem, StockItem, OrderColumn, SavedPlan, PurchaseItem, Settings, ModelColorSummary, CuttingPattern } from "../lib/optimizer";
 import { exportToExcel } from '../lib/exportUtils';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { cn, useTableState } from "@/lib/utils";
@@ -24,6 +24,181 @@ const toMm = (len: number | string) => {
 
 const getMaterialKey = (model: string, color: string, length: number | string) => {
   return `${String(model || '').trim().toLowerCase()}|${String(color || '').trim().toLowerCase()}|${toMm(length)}`;
+};
+
+/** 从套裁单的汇总项/方案中提取来源采购单号；定尺或无明确单号返回空字符串 */
+const extractPatternOrderNumber = (summary: ModelColorSummary, pattern: CuttingPattern): string => {
+  if (pattern.isFixed || summary.isFixed) return '';
+  if (pattern.orderNumber && pattern.orderNumber.trim()) {
+    return pattern.orderNumber.trim();
+  }
+  const origStr = String(summary.originalLength || '');
+  const firstParen = origStr.indexOf('(');
+  const lastParen = origStr.lastIndexOf(')');
+  if (firstParen !== -1 && lastParen > firstParen) {
+    const inside = origStr.substring(firstParen + 1, lastParen).trim();
+    if (
+      inside &&
+      inside !== '定尺' &&
+      inside !== '定' &&
+      inside !== '库存' &&
+      inside !== '库' &&
+      !inside.startsWith('料头') &&
+      !inside.startsWith('使用 ') &&
+      !inside.startsWith('型号') &&
+      !inside.startsWith('颜色')
+    ) {
+      return inside;
+    }
+  }
+  return '';
+};
+
+/** 提取单张套裁单上标注的所有不重复采购单号 */
+const extractPlanOrderNumbers = (plan?: SavedPlan | null): string[] => {
+  if (!plan?.results?.summaries) return [];
+  const set = new Set<string>();
+  plan.results.summaries.forEach(s => {
+    (s.patterns || []).forEach(p => {
+      const ord = extractPatternOrderNumber(s, p);
+      if (ord) set.add(ord);
+    });
+  });
+  return Array.from(set);
+};
+
+/** 检查套裁单中带采购单号的用料，在销料表同规格行中是否有缺失该采购单号的情况 */
+const findMissingPlanOrders = (salesRows: ProfileSalesItem[], plan: SavedPlan): string[] => {
+  const missing = new Set<string>();
+  const rowsByMatKey = new Map<string, ProfileSalesItem[]>();
+  salesRows.forEach(item => {
+    const mk = getMaterialKey(item.model, item.color, item.length);
+    const list = rowsByMatKey.get(mk) || [];
+    list.push(item);
+    rowsByMatKey.set(mk, list);
+  });
+  plan.results.summaries.forEach(s => {
+    (s.patterns || []).forEach(p => {
+      const orderNo = extractPatternOrderNumber(s, p);
+      if (!orderNo) return;
+      const mk = getMaterialKey(s.model, s.color, p.originalLength);
+      const matched = rowsByMatKey.get(mk);
+      if (matched && matched.length > 0 && !matched.some(r => (r.orderNumber || '').trim() === orderNo)) {
+        missing.add(orderNo);
+      }
+    });
+  });
+  return Array.from(missing);
+};
+
+/**
+ * 将单个套裁单的用量分配扣减到销料表指定列（updatedData 中的 item.orders 会就地更新，调用前需确保已克隆 item.orders）
+ * 当 matchPlanOrderNumbers 为 true 时，带明确采购单号的用料严格扣减到对应采购单号行；无单号/定尺料则按勾选与排序优先级扣减。
+ */
+const allocateSinglePlanToSalesRows = (
+  updatedData: ProfileSalesItem[],
+  allColumns: OrderColumn[],
+  targetColId: string,
+  plan: SavedPlan,
+  priority: string[],
+  checked: string[],
+  matchPlanOrderNumbers: boolean,
+  emptyCheckedMeansAll = false
+): { missingOrders: string[] } => {
+  const missingOrdersSet = new Set<string>();
+
+  // 聚合需求：(materialKey, orderNo) -> totalUsage
+  const demandEntriesMap = new Map<string, { materialKey: string; orderNo: string; totalUsage: number }>();
+  const touchedMaterialKeys = new Set<string>();
+
+  plan.results.summaries.forEach(s => {
+    (s.patterns || []).forEach(p => {
+      const materialKey = getMaterialKey(s.model, s.color, p.originalLength);
+      touchedMaterialKeys.add(materialKey);
+      const orderNo = matchPlanOrderNumbers ? extractPatternOrderNumber(s, p) : '';
+      const groupKey = `${materialKey}@@${orderNo}`;
+      const existing = demandEntriesMap.get(groupKey);
+      if (existing) {
+        existing.totalUsage += p.count;
+      } else {
+        demandEntriesMap.set(groupKey, { materialKey, orderNo, totalUsage: p.count });
+      }
+    });
+  });
+
+  // 先将当前列在相关规格上的旧扣减值清零，以便同规格多组需求（如指定单号 + 定尺）依次安全累加
+  updatedData.forEach(item => {
+    if (touchedMaterialKeys.has(getMaterialKey(item.model, item.color, item.length))) {
+      item.orders[targetColId] = 0;
+    }
+  });
+
+  // 有明确采购单号的需求优先分配，定尺/无单号需求后分配，避免定尺料提前抢占指定采购单号的可用余量
+  const sortedEntries = Array.from(demandEntriesMap.values()).sort((a, b) => {
+    if (a.orderNo && !b.orderNo) return -1;
+    if (!a.orderNo && b.orderNo) return 1;
+    return 0;
+  });
+
+  const sortByPriority = (items: ProfileSalesItem[]) => {
+    items.sort((a, b) => {
+      const idxA = priority.indexOf(a.orderNumber || '');
+      const idxB = priority.indexOf(b.orderNumber || '');
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
+      return (a.orderNumber || '').localeCompare(b.orderNumber || '');
+    });
+  };
+
+  sortedEntries.forEach(({ materialKey, orderNo, totalUsage }) => {
+    const allMatchingItems = updatedData.filter(
+      d => getMaterialKey(d.model, d.color, d.length) === materialKey
+    );
+    if (allMatchingItems.length === 0) return;
+
+    let targetItems: ProfileSalesItem[];
+    if (matchPlanOrderNumbers && orderNo) {
+      const exactOrderItems = allMatchingItems.filter(
+        item => (item.orderNumber || '').trim() === orderNo
+      );
+      if (exactOrderItems.length > 0) {
+        targetItems = [...exactOrderItems];
+      } else {
+        // 销料表未找到该规格对应的指定采购单号，回退至当前勾选/所有匹配行并记录提示
+        missingOrdersSet.add(orderNo);
+        const fallbackChecked = checked.length > 0
+          ? allMatchingItems.filter(item => checked.includes(item.orderNumber || ''))
+          : allMatchingItems;
+        targetItems = fallbackChecked.length > 0 ? [...fallbackChecked] : [...allMatchingItems];
+        sortByPriority(targetItems);
+      }
+    } else {
+      targetItems = (emptyCheckedMeansAll && checked.length === 0)
+        ? [...allMatchingItems]
+        : allMatchingItems.filter(item => checked.includes(item.orderNumber || ''));
+      if (targetItems.length === 0) return;
+      sortByPriority(targetItems);
+    }
+
+    let remainingUsage = totalUsage;
+    targetItems.forEach(item => {
+      // 计算该行在所有列（含前面分组已扣减到本列的用量）中的总占用
+      const usedInAllCols = allColumns.reduce((sum, c) => sum + (item.orders?.[c.id] || 0), 0);
+      const available = Math.max(0, item.quantity - usedInAllCols);
+      if (remainingUsage > 0 && available > 0) {
+        const toLog = Math.min(available, remainingUsage);
+        item.orders[targetColId] = (item.orders[targetColId] || 0) + toLog;
+        remainingUsage -= toLog;
+      }
+    });
+
+    if (remainingUsage > 0 && targetItems.length > 0) {
+      targetItems[0].orders[targetColId] = (targetItems[0].orders[targetColId] || 0) + remainingUsage;
+    }
+  });
+
+  return { missingOrders: Array.from(missingOrdersSet) };
 };
 
 interface ProfileSalesTableProps {
@@ -474,6 +649,7 @@ export const ProfileSalesTable = React.memo(function ProfileSalesTable({
     colId?: string; 
     priority: string[]; 
     checked: string[];
+    planOrderNumbers?: string[];
     title?: string;
     description?: string;
     confirmText?: string;
@@ -492,9 +668,19 @@ export const ProfileSalesTable = React.memo(function ProfileSalesTable({
     });
   }, [data]);
 
-  const executeRefreshMatch = useCallback((priority: string[] = [], checked: string[] = []) => {
+  const executeRefreshMatch = useCallback((priority: string[] = [], checked: string[] = [], matchPlanOrderNumbers = false) => {
     if (priority.length > 0) {
       setGlobalOrderPriority(priority);
+    }
+
+    const allMissingOrders = new Set<string>();
+    if (matchPlanOrderNumbers) {
+      columns.forEach(col => {
+        const plan = savedPlans.find(p => p.name === col.name);
+        if (plan) {
+          findMissingPlanOrders(data, plan).forEach(ord => allMissingOrders.add(ord));
+        }
+      });
     }
 
     setData(prevData => {
@@ -522,74 +708,31 @@ export const ProfileSalesTable = React.memo(function ProfileSalesTable({
         const plan = savedPlans.find(p => p.name === col.name);
         if (!plan) return; // Non-plan columns keep their existing values
 
-        // Aggregate required quantities from the plan by normalized key
-        const planDemands = new Map<string, number>();
-        plan.results.summaries.forEach(s => {
-          s.patterns.forEach(p => {
-            const key = getMaterialKey(s.model, s.color, p.originalLength);
-            planDemands.set(key, (planDemands.get(key) || 0) + p.count);
-          });
-        });
-
-        // For each required material in this plan
-        planDemands.forEach((totalUsage, demandKey) => {
-          // Find all rows in updatedData that match this model|color|normLen
-          const allMatchingItems = updatedData.filter(d => {
-            return getMaterialKey(d.model, d.color, d.length) === demandKey;
-          });
-
-          if (allMatchingItems.length === 0) return;
-
-          // Only items checked in the priority dialog participate
-          const checkedMatchingItems = checked.length > 0 
-            ? allMatchingItems.filter(item => checked.includes(item.orderNumber || ''))
-            : allMatchingItems;
-
-          // Sort matching items according to priority order
-          checkedMatchingItems.sort((a, b) => {
-            const idxA = priority.indexOf(a.orderNumber || '');
-            const idxB = priority.indexOf(b.orderNumber || '');
-            if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-            if (idxA !== -1) return -1;
-            if (idxB !== -1) return 1;
-            return (a.orderNumber || '').localeCompare(b.orderNumber || '');
-          });
-
-          let remainingUsage = totalUsage;
-
-          // Deduct from available quantity in order of matching items
-          checkedMatchingItems.forEach(item => {
-            // Already used in other columns (including previously processed columns!)
-            const usedInOtherCols = columns
-              .filter(c => c.id !== col.id)
-              .reduce((sum, c) => sum + (item.orders?.[c.id] || 0), 0);
-            const available = Math.max(0, item.quantity - usedInOtherCols);
-
-            if (remainingUsage > 0) {
-              const toLog = Math.min(available, remainingUsage);
-              item.orders[col.id] = toLog;
-              remainingUsage -= toLog;
-            } else {
-              item.orders[col.id] = 0;
-            }
-          });
-
-          // If available stock was insufficient, record shortage on the first matching item
-          if (remainingUsage > 0) {
-            if (checkedMatchingItems.length > 0) {
-              checkedMatchingItems[0].orders[col.id] = (checkedMatchingItems[0].orders[col.id] || 0) + remainingUsage;
-            } else if (allMatchingItems.length > 0) {
-              allMatchingItems[0].orders[col.id] = (allMatchingItems[0].orders[col.id] || 0) + remainingUsage;
-            }
-          }
-        });
+        allocateSinglePlanToSalesRows(
+          updatedData,
+          columns,
+          col.id,
+          plan,
+          priority,
+          checked,
+          matchPlanOrderNumbers,
+          true
+        );
       });
 
       return updatedData;
     });
 
-    toast.success("已按采购单销料顺序与单号添加顺序依次重新匹配销料");
-  }, [columns, savedPlans, setData]);
+    if (matchPlanOrderNumbers) {
+      if (allMissingOrders.size > 0) {
+        toast.warning(`已按套裁单采购单号重新匹配；以下单号未在同规格销料表中找到，已按备选顺序扣减：${Array.from(allMissingOrders).join('、')}`);
+      } else {
+        toast.success("已严格按照各套裁单上的采购单号依次重新匹配销料");
+      }
+    } else {
+      toast.success("已按采购单销料顺序与单号添加顺序依次重新匹配销料");
+    }
+  }, [columns, data, savedPlans, setData]);
 
   const handleOpenRefreshMatchDialog = useCallback(() => {
     const availOrders = getAvailableOrders();
@@ -601,15 +744,24 @@ export const ProfileSalesTable = React.memo(function ProfileSalesTable({
       ? Array.from(new Set([...globalOrderPriority, ...availOrders])) 
       : [...availOrders];
 
+    const planOrdersSet = new Set<string>();
+    columns.forEach(col => {
+      const plan = savedPlans.find(p => p.name === col.name);
+      if (plan) {
+        extractPlanOrderNumbers(plan).forEach(ord => planOrdersSet.add(ord));
+      }
+    });
+
     setSortPriorityDialogData({
       type: 'refresh',
       priority: activePriority,
       checked: [...activePriority],
+      planOrderNumbers: Array.from(planOrdersSet),
       title: "选择并排序采购单销料顺序",
       description: "支持复选、排序、置顶和置尾。勾选的采购单号参与销料，排列越靠上扣减优先级越高。将按添加单号顺序依次重新匹配。",
       confirmText: "确认重新匹配"
     });
-  }, [getAvailableOrders, globalOrderPriority, executeRefreshMatch]);
+  }, [columns, savedPlans, getAvailableOrders, globalOrderPriority, executeRefreshMatch]);
 
   const executeDigestReplenishments = useCallback((priority: string[] = [], checked: string[] = []) => {
     if (priority.length > 0) {
@@ -843,95 +995,47 @@ export const ProfileSalesTable = React.memo(function ProfileSalesTable({
       colId: targetColId, 
       priority: activePriority, 
       checked: [...activePriority],
+      planOrderNumbers: extractPlanOrderNumbers(plan),
       title: "选择并排序采购单销料顺序",
       description: "支持复选、排序、置顶和置尾。勾选的单号参与销料，排列越靠上扣减优先级越高。",
       confirmText: "确认导入"
     });
   }, [data, getAvailableOrders, globalOrderPriority, savedPlans]);
 
-  const executeImportUsage = useCallback((planId: string, targetColId?: string, priority: string[] = [], checked: string[] = []) => {
+  const executeImportUsage = useCallback((planId: string, targetColId?: string, priority: string[] = [], checked: string[] = [], matchPlanOrderNumbers = false) => {
     const plan = savedPlans.find(p => p.id === planId);
     if (!plan) return;
 
     setGlobalOrderPriority(priority);
 
-    const usages = new Map<string, number>();
-    plan.results.summaries.forEach(s => {
-      s.patterns.forEach(p => {
-        let rawLength = parseFloat(String(p.originalLength));
-        if (rawLength < 100) rawLength = Math.floor(rawLength * 100) / 100;
-        else rawLength = Math.floor(rawLength / 10) * 10;
-        const normalizedRawLength = rawLength < 100 ? rawLength * 1000 : rawLength;
-        const key = `${String(s.model).trim()}|${s.color}|${rawLength}`;
-        const keyNorm = `${String(s.model).trim()}|${s.color}|${normalizedRawLength}`;
-        usages.set(key, (usages.get(key) || 0) + p.count);
-        if (key !== keyNorm) usages.set(keyNorm, (usages.get(keyNorm) || 0) + p.count);
-      });
-    });
-
     let finalColId = targetColId;
+    let effectiveColumns = columns;
     if (!finalColId) {
       finalColId = 'o' + Math.random().toString(36).substr(2, 5);
-      setColumns(cols => [...cols, { id: finalColId!, name: plan.name }]);
+      const newCol = { id: finalColId, name: plan.name };
+      effectiveColumns = [...columns, newCol];
+      setColumns(cols => [...cols, newCol]);
       setColumnWidths(prev => ({ ...prev, [finalColId!]: 100 }));
     }
 
+    const missingOrders = matchPlanOrderNumbers ? findMissingPlanOrders(data, plan) : [];
+
     setData(prev => {
-      const updatedData = [...prev];
-      
-      Array.from(usages.entries()).forEach(([key, totalUsage]) => {
-         const allMatchingItems = updatedData.filter(d => {
-            const dTrimmed = String(d.model).trim();
-            const dKey1 = `${dTrimmed}|${d.color}|${d.length}`;
-            const dKey2 = d.length < 100 ? `${dTrimmed}|${d.color}|${d.length * 1000}` : dKey1;
-            return dKey1 === key || dKey2 === key;
-         });
+      const updatedData: ProfileSalesItem[] = prev.map(item => ({
+        ...item,
+        orders: { ...(item.orders || {}) }
+      }));
 
-         allMatchingItems.forEach(item => {
-           if (item.orders) {
-             const newOrders = { ...item.orders };
-             delete newOrders[finalColId!];
-             item.orders = newOrders;
-           } else {
-             item.orders = {};
-           }
-           item.orders[finalColId!] = 0;
-         });
-
-         const checkedMatchingItems = allMatchingItems.filter(item => 
-           checked.includes(item.orderNumber || '')
-         );
-         
-         if (checkedMatchingItems.length === 0) return;
-         
-         checkedMatchingItems.sort((a, b) => {
-           const idxA = priority.indexOf(a.orderNumber || '');
-           const idxB = priority.indexOf(b.orderNumber || '');
-           if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-           if (idxA !== -1) return -1;
-           if (idxB !== -1) return 1;
-           return 0;
-         });
-         
-         let remainingUsage = totalUsage;
-         
-         checkedMatchingItems.forEach(item => {
-           const usedInOtherCols = columns.filter(c => c.id !== finalColId).reduce((sum, c) => sum + (item.orders?.[c.id] || 0), 0);
-           const available = Math.max(0, item.quantity - usedInOtherCols);
-           
-           if (remainingUsage > 0) {
-              const toLog = Math.min(available, remainingUsage);
-              item.orders[finalColId!] = toLog;
-              remainingUsage -= toLog;
-           } else {
-              item.orders[finalColId!] = 0;
-           }
-         });
-         
-         if (remainingUsage > 0 && checkedMatchingItems.length > 0) {
-            checkedMatchingItems[0].orders[finalColId!] = (checkedMatchingItems[0].orders[finalColId!] || 0) + remainingUsage;
-         }
-      });
+      allocateSinglePlanToSalesRows(
+        updatedData,
+        effectiveColumns,
+        finalColId!,
+        plan,
+        priority,
+        checked,
+        matchPlanOrderNumbers,
+        false
+      );
       return updatedData;
     });
 
@@ -939,9 +1043,17 @@ export const ProfileSalesTable = React.memo(function ProfileSalesTable({
       setColumns(cols => cols.map(c => c.id === finalColId ? { ...c, name: plan.name } : c));
     }
 
-    toast.success(`已成功导入套裁单 "${plan.name}" 的用量！`);
+    if (matchPlanOrderNumbers) {
+      if (missingOrders.length > 0) {
+        toast.warning(`已导入套裁单 "${plan.name}"！其中采购单号 ${missingOrders.join('、')} 在同规格销料表中未找到，已按备选顺序扣减`);
+      } else {
+        toast.success(`已按套裁单 "${plan.name}" 上的采购单号自动完成销料！`);
+      }
+    } else {
+      toast.success(`已成功导入套裁单 "${plan.name}" 的用量！`);
+    }
     setMismatchData(null);
-  }, [columns, savedPlans, setColumns, setData]);
+  }, [columns, data, savedPlans, setColumns, setData]);
 
   useEffect(() => {
     if (importQueue.length > 0 && !mismatchData && !sortPriorityDialogData) {
@@ -955,19 +1067,21 @@ export const ProfileSalesTable = React.memo(function ProfileSalesTable({
         const activePriority = globalOrderPriority.length > 0 
           ? Array.from(new Set([...globalOrderPriority, ...availOrders])) 
           : [...availOrders];
+        const plan = savedPlans.find(p => p.id === mismatchData.planId);
         setSortPriorityDialogData({ 
           type: 'import',
           planId: mismatchData.planId, 
           colId: mismatchData.colId, 
           priority: activePriority, 
           checked: [...activePriority],
+          planOrderNumbers: extractPlanOrderNumbers(plan),
           title: "选择并排序采购单销料顺序",
           description: "支持复选、排序、置顶和置尾。勾选的单号参与销料，排列越靠上扣减优先级越高。",
           confirmText: "确认导入"
         });
         setMismatchData(null);
      }
-  }, [getAvailableOrders, globalOrderPriority, mismatchData]);
+  }, [getAvailableOrders, globalOrderPriority, mismatchData, savedPlans]);
   
   const handleMismatchCancel = useCallback(() => {
      setMismatchData(null);
@@ -1075,15 +1189,16 @@ export const ProfileSalesTable = React.memo(function ProfileSalesTable({
     colId?: string, 
     priority: string[] = [], 
     checked: string[] = [],
-    type?: 'import' | 'refresh' | 'digest'
+    type?: 'import' | 'refresh' | 'digest',
+    matchPlanOrderNumbers = false
   ) => {
     if (type === 'refresh') {
-      executeRefreshMatch(priority, checked);
+      executeRefreshMatch(priority, checked, matchPlanOrderNumbers);
     } else if (type === 'digest') {
       executeDigestReplenishments(priority, checked);
     } else {
       if (planId) {
-        executeImportUsage(planId, colId, priority, checked);
+        executeImportUsage(planId, colId, priority, checked, matchPlanOrderNumbers);
       }
       setImportQueue(q => q.slice(1));
     }
