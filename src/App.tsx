@@ -864,107 +864,95 @@ export default function App() {
   };
 
   const handleBindExistingLocalFile = async () => {
+    reportClientLog('info', 'BindHandle', `用户触发绑定本地文件, 环境: ${navigator.userAgent}`);
     if (!canUseNativeFilePicker) {
-      toast.info("当前环境不支持原生文件句柄，请在新标签页访问");
+      alert("当前浏览器环境未开放文件句柄权限（请确保在 Chrome/Edge 中且使用 https:// 独立标签页访问）");
       return;
     }
-    const isEng = mainMode === 'engineering';
-    const ext = isEng ? '.wce' : '.json';
-    const currentName = isEng ? currentProjectName : currentOptimizationName;
-    const suggestedName = currentName ? ensureFileExtension(currentName, ext) : getDefaultFileName(false);
-
-    toast.info(`请在弹出的系统窗口中选择本地存放「${suggestedName}」的文件以完成句柄提交`, { duration: 4000 });
 
     let handles: any[] | null = null;
     try {
-      // 关键突破：使用 showOpenFilePicker 获取物理文件句柄，100% 稳定，彻底规避 Windows Chromium 覆盖同名文件时的 AbortError Bug！
-      handles = await (window as any).showOpenFilePicker({
-        multiple: false,
-        types: [
-          {
-            description: isEng ? '工程项目文件 (*.wce)' : '套裁优化文件 (*.json)',
-            accept: isEng
-              ? { 'application/json': ['.wce'], 'application/octet-stream': ['.wce'] }
-              : { 'application/json': ['.json'] }
-          }
-        ]
-      });
+      // 关键极简配置：必须在手势第一瞬间直接调起，不设严苛 MIME，确保 Windows 文件对话框 100% 正常弹起并显示所有格式
+      const pickerOptions: any = {
+        multiple: false
+      };
+      handles = await (window as any).showOpenFilePicker(pickerOptions);
     } catch (e: any) {
-      if (e?.name === 'AbortError') return;
-      toast.error(`调起文件窗口异常：${e?.message || '请检查权限'}`);
+      if (e?.name === 'AbortError') {
+        reportClientLog('info', 'BindHandle', '用户关闭了选择文件窗口');
+        return;
+      }
+      reportClientLog('error', 'BindHandle', `showOpenFilePicker 异常: ${e?.message}`, null, e?.stack);
+      alert(`【调起文件窗口异常】
+类型: ${e?.name}
+原因: ${e?.message}`);
       return;
     }
 
     if (!handles || !handles[0]) return;
     const handle = handles[0];
+    reportClientLog('info', 'BindHandle', `用户已选中本地文件: ${handle.name}，开始授权与写入...`);
 
     const toastId = toast.loading(`正在写入并绑定文件句柄：${handle.name}...`);
     try {
-      const projectData = buildCurrentProjectData();
-      const jsonText = JSON.stringify(projectData, null, 2);
-      const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
-      const writable = await handle.createWritable({ keepExistingData: false });
-      await writable.write(blob);
-      await writable.close();
+      // 复用完整的 silentSaveWithHandle：自动请求写权限、自动写入数据并处理超时
+      const res = await silentSaveWithHandle(handle, { silentToast: true });
+      toast.dismiss(toastId);
 
-      const safeName = handle.name || suggestedName;
-      if (isEng) {
-        setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
-        updateProjectHandle(handle);
-        setSavedEngRev(engRev);
-      } else {
-        setCurrentOptimizationName(safeName.replace(/\.[^/.]+$/, ""));
-        updateOptimizationHandle(handle);
-        setSavedOptRev(optRev);
+      if (res.ok) {
+        toast.success(`文件句柄已成功提交并绑定：${handle.name}！后续保存将直接原地更新。`);
+        reportClientLog('info', 'BindHandle', `成功完成本地句柄绑定与写入: ${handle.name}`);
+        await loadHistoryList();
+        return;
       }
 
-      await saveToHistory(safeName, projectData, currentName, handle, isEng ? 'engineering' : 'optimization');
-      await loadHistoryList();
-      toast.dismiss(toastId);
-      toast.success(`文件句柄已成功提交并绑定！后续点击保存或 Ctrl+S 将直接原地更新：${handle.name}`);
-      reportClientLog('info', 'BindHandle', `成功绑定本地文件句柄: ${handle.name}`);
+      reportClientLog('warn', 'BindHandle', `句柄写入未成功: ${res.message}`);
+      alert(`【绑定受限】未能向该文件写入数据：
+${res.message || '请检查该文件是否被其他程序占用'}`);
     } catch (err: any) {
       toast.dismiss(toastId);
-      toast.error(`写入文件失败：${err?.message || '文件可能被占用或权限不足'}`);
-      reportClientLog('error', 'BindHandle', `绑定文件写入失败: ${err?.message}`, null, err?.stack);
+      reportClientLog('error', 'BindHandle', `写入过程发生未捕获异常: ${err?.message}`, null, err?.stack);
+      alert(`【系统异常】写入本地文件失败：
+${err?.message}`);
     }
   };
 
   const bindCachedItemToLocalFile = async (item: any) => {
+    reportClientLog('info', 'BindCached', `用户触发对缓存项绑定文件: ${item.name}`);
     if (!canUseNativeFilePicker) {
-      toast.info("当前环境不支持原生文件句柄，请在新标签页访问");
+      alert("当前浏览器环境未开放文件句柄权限");
       return;
     }
-    const isEng = (item.data && (Array.isArray(item.data.purchases) || Array.isArray(item.data.savedPlans))) || item.name.endsWith('.wce');
-    const ext = isEng ? '.wce' : '.json';
-    const suggestedName = ensureFileExtension(item.name, ext);
-
-    toast.info(`请在文件窗口中选择本地存放「${suggestedName}」的文件以完成句柄绑定`, { duration: 4000 });
 
     let handles: any[] | null = null;
     try {
-      handles = await (window as any).showOpenFilePicker({
-        multiple: false,
-        types: [
-          {
-            description: isEng ? '工程项目文件 (*.wce)' : '套裁优化文件 (*.json)',
-            accept: isEng
-              ? { 'application/json': ['.wce'], 'application/octet-stream': ['.wce'] }
-              : { 'application/json': ['.json'] }
-          }
-        ]
-      });
+      handles = await (window as any).showOpenFilePicker({ multiple: false });
     } catch (e: any) {
       if (e?.name === 'AbortError') return;
-      console.warn("showOpenFilePicker 出现异常:", e);
+      alert(`调起文件窗口受限：${e?.message}`);
       return;
     }
 
     if (!handles || !handles[0]) return;
     const handle = handles[0];
 
-    const toastId = toast.loading(`正在写入并绑定文件句柄：${handle.name}...`);
+    const toastId = toast.loading(`正在向本地文件写入缓存数据：${handle.name}...`);
     try {
+      const isEng = (item.data && (Array.isArray(item.data.purchases) || Array.isArray(item.data.savedPlans))) || item.name.endsWith('.wce');
+      
+      // 检查并申请写权限
+      if (typeof handle.queryPermission === 'function') {
+        let perm = await handle.queryPermission({ mode: 'readwrite' });
+        if (perm !== 'granted' && typeof handle.requestPermission === 'function') {
+          perm = await handle.requestPermission({ mode: 'readwrite' });
+        }
+        if (perm !== 'granted') {
+          toast.dismiss(toastId);
+          alert("未获得对该本地文件的写入授权，无法绑定");
+          return;
+        }
+      }
+
       const dataToWrite = item.data || buildCurrentProjectData();
       const jsonText = JSON.stringify(dataToWrite, null, 2);
       const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
@@ -975,7 +963,7 @@ export default function App() {
       // 升级历史记录
       await saveToHistory(handle.name, dataToWrite, item.name, handle, isEng ? 'engineering' : 'optimization');
       
-      // 如果当前页面打开的正巧是这个项目，立即激活当前句柄引用！
+      // 若当前正打开该项目，立即激活句柄
       const currentName = isEng ? currentProjectName : currentOptimizationName;
       if (currentName && (currentName === item.name.replace(/\.[^/.]+$/, "") || currentName === handle.name.replace(/\.[^/.]+$/, ""))) {
         if (isEng) {
@@ -992,9 +980,12 @@ export default function App() {
       await loadHistoryList();
       toast.dismiss(toastId);
       toast.success(`文件句柄提交成功！历史记录已升级为本地文件：${handle.name}`);
+      reportClientLog('info', 'BindCached', `成功升级历史记录为本地文件: ${handle.name}`);
     } catch (err: any) {
       toast.dismiss(toastId);
-      toast.error(`绑定写入失败：${err?.message || '文件可能被占用或权限不足'}`);
+      reportClientLog('error', 'BindCached', `写入失败: ${err?.message}`, null, err?.stack);
+      alert(`写入本地文件失败：
+${err?.message}`);
     }
   };
 

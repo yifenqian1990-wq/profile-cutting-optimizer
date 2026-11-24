@@ -261,10 +261,34 @@ app.post('/api/cancel/:taskId', (req, res) => {
 
 // 1. 让 Express 能够识别并提供 dist 文件夹里的静态资源（js, css, 图片等）
 const distPath = path.join(process.cwd(), 'dist'); 
-app.use(express.static(distPath));
+
+// 关键防缓存配置：确保 index.html 永不被浏览器或 CDN 强缓存，保证代码发布即刻生效
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path.endsWith('.html')) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+  next();
+});
+
+app.use(express.static(distPath, {
+  etag: true,
+  lastModified: true,
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 
 // 2. 兜底路由：把所有非 API 的请求，全部交给 dist/index.html，由前端 React 路由处理
 app.get('*', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
