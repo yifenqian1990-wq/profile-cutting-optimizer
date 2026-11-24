@@ -768,27 +768,49 @@ export default function App() {
     }
   };
 
-  const saveToHistory = async (filename: string, projectData: any, oldName: string, fileHandle: any = null) => {
+  const saveToHistory = async (
+    filename: string,
+    projectData: any,
+    oldName: string,
+    fileHandle: any = null,
+    targetModeOverride?: 'engineering' | 'optimization'
+  ) => {
     try {
-      const storageKey = mainMode === 'engineering' ? 'wire-optimizer-engineering-history' : 'wire-optimizer-optimization-history';
+      // 智能识别目标模式：避免导入或跨模式保存时，由于 React 状态异步导致存错 storageKey
+      const effectiveMode = targetModeOverride || (() => {
+        if (!projectData) return mainMode;
+        const looksLikeOpt = Array.isArray(projectData.demands) || Array.isArray(projectData.stocks) || projectData.results !== undefined;
+        const looksLikeEng = Array.isArray(projectData.purchases) || Array.isArray(projectData.profileSales) || Array.isArray(projectData.savedPlans);
+        if (looksLikeOpt && !looksLikeEng) return 'optimization';
+        if (looksLikeEng && !looksLikeOpt) return 'engineering';
+        return mainMode;
+      })();
+
+      const storageKey = effectiveMode === 'engineering'
+        ? 'wire-optimizer-engineering-history'
+        : 'wire-optimizer-optimization-history';
       const rawHistory = await get(storageKey);
       let history = Array.isArray(rawHistory) ? rawHistory : [];
       
       let targetId = Date.now().toString();
       let preservedHandle = fileHandle;
+      const cleanFilename = filename.replace(/\.[^/.]+$/, "");
+
       if (oldName) {
+        const cleanOld = oldName.replace(/\.[^/.]+$/, "");
         const existingIndex = history.findIndex((item: any) => 
-          item.name === oldName || 
-          item.name.replace(/\.[^/.]+$/, "") === oldName
+          item && (item.name === oldName || item.name.replace(/\.[^/.]+$/, "") === cleanOld)
         );
         if (existingIndex !== -1) {
           targetId = history[existingIndex].id;
-          if (!preservedHandle && history[existingIndex].name === filename && history[existingIndex].handle) {
+          if (!preservedHandle && history[existingIndex].handle) {
             preservedHandle = history[existingIndex].handle;
           }
         }
       } else {
-        const existingIndex = history.findIndex((item: any) => item.name === filename);
+        const existingIndex = history.findIndex((item: any) => 
+          item && (item.name === filename || item.name.replace(/\.[^/.]+$/, "") === cleanFilename)
+        );
         if (existingIndex !== -1) {
           targetId = history[existingIndex].id;
           if (!preservedHandle && history[existingIndex].handle) {
@@ -807,34 +829,88 @@ export default function App() {
       
       history = history.filter((item: any) => {
         if (!item || !item.name) return false;
-        const isMatchNew = item.name === filename;
+        const itemClean = item.name.replace(/\.[^/.]+$/, "");
+        const isMatchNew = item.name === filename || itemClean === cleanFilename;
         const isMatchOld = oldName ? (
-          item.name === oldName || 
-          item.name.replace(/\.[^/.]+$/, "") === oldName
+          item.name === oldName || itemClean === oldName.replace(/\.[^/.]+$/, "")
         ) : false;
         return !isMatchNew && !isMatchOld;
       });
       
-      const newHistory = [newRecord, ...history].slice(0, 10); // Keep last 10
+      const newHistory = [newRecord, ...history].slice(0, 10);
       try {
         await set(storageKey, newHistory);
-        setHistoryList(newHistory);
+        if (effectiveMode === mainMode) {
+          setHistoryList(newHistory);
+        }
       } catch (storageErr) {
-        // Fallback if IndexedDB quota or handle cloning fails
+        console.warn("存储完整工程数据超限，启用句柄优先轻量模式存储:", storageErr);
+        // 关键安全守护：优先保留物理文件句柄 handle！绝不能因为数据大而丢掉 handle
         try {
           const lightweightRecord = { ...newRecord, data: preservedHandle ? null : projectData };
           const fallbackHistory = [lightweightRecord, ...history].slice(0, 10);
           await set(storageKey, fallbackHistory);
-          setHistoryList(fallbackHistory);
+          if (effectiveMode === mainMode) {
+            setHistoryList(fallbackHistory);
+          }
         } catch (secondErr) {
-          const noHandleRecord = { ...newRecord, handle: null };
-          const fallbackHistory = [noHandleRecord, ...history].slice(0, 10);
-          await set(storageKey, fallbackHistory);
-          setHistoryList(fallbackHistory);
+          console.error("保存历史记录失败:", secondErr);
         }
       }
     } catch (e) {
       console.error("Failed to save history:", e);
+    }
+  };
+
+  const bindCachedItemToLocalFile = async (item: any) => {
+    if (!canUseNativeFilePicker) {
+      toast.info("当前环境不支持原生文件句柄，请在新标签页访问");
+      return;
+    }
+    const isEng = (item.data && (Array.isArray(item.data.purchases) || Array.isArray(item.data.savedPlans))) || item.name.endsWith('.wce');
+    const ext = isEng ? '.wce' : '.json';
+    const suggestedName = ensureFileExtension(item.name, ext);
+
+    let handle: any = null;
+    try {
+      const pickerOptions: any = {
+        suggestedName,
+        types: [
+          {
+            description: isEng ? '工程项目文件 (*.wce)' : '套裁优化文件 (*.json)',
+            accept: isEng
+              ? { 'application/json': ['.wce'], 'application/octet-stream': ['.wce'] }
+              : { 'application/json': ['.json'] }
+          }
+        ],
+        excludeAcceptAllOption: false
+      };
+      handle = await (window as any).showSaveFilePicker(pickerOptions);
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return;
+      toast.error(`调起文件保存受限：${e?.message}`);
+      return;
+    }
+
+    if (!handle) return;
+
+    const toastId = toast.loading(`正在将缓存写入本地文件：${handle.name}...`);
+    try {
+      const dataToWrite = item.data || buildCurrentProjectData();
+      const jsonText = JSON.stringify(dataToWrite, null, 2);
+      const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+      const writable = await handle.createWritable({ keepExistingData: false });
+      await writable.write(blob);
+      await writable.close();
+
+      // 升级历史记录
+      await saveToHistory(handle.name, dataToWrite, item.name, handle, isEng ? 'engineering' : 'optimization');
+      await loadHistoryList();
+      toast.dismiss(toastId);
+      toast.success(`已成功升级并绑定本地文件：${handle.name}`);
+    } catch (err: any) {
+      toast.dismiss(toastId);
+      toast.error(`绑定写入失败：${err?.message || '未知错误'}`);
     }
   };
 
@@ -1132,11 +1208,8 @@ export default function App() {
       ? ensureFileExtension(customSuggestedName, ext)
       : getDefaultFileName(isSaveAs);
 
-    reportClientLog('info', 'PickAndSave', `调起原生保存窗口, 建议文件名: ${suggestedName}`);
-
     if (!canUseNativeFilePicker) {
-      reportClientLog('warn', 'PickAndSave', '环境不支持原生文件句柄，降级直接下载');
-      alert(`【环境诊断提示】当前浏览器环境未开放本地文件物理句柄权限！\n\n原因诊断：\n- 访问协议: ${window.location.protocol} (要求必须为 https:// 或 localhost)\n- 安全上下文: ${window.isSecureContext ? '正常' : '异常(非安全上下文，Chrome强制禁用写句柄)'}\n- 原生API支持: ${typeof (window as any).showSaveFilePicker}\n- 是否处于iframe: ${isInIframe ? '是(受限)' : '否'}\n\n系统已为您直接下载文件副本。请确保通过 https://tc.yifen.us.ci 独立标签页访问！`);
+      toast.info("当前浏览器环境未开放本地文件句柄权限，为您直接下载文件副本");
       await executeExport(suggestedName, isSaveAs, true);
       return 'downloaded';
     }
@@ -1144,19 +1217,43 @@ export default function App() {
     let handle: any = null;
 
     try {
+      // 必须保持最纯净的同步调用链直接调起，严禁在调起前插入异步网络请求避免消耗用户手势！
       const pickerOptions: any = {
-        suggestedName
+        suggestedName,
+        types: [
+          {
+            description: isEng ? '工程项目文件 (*.wce)' : '套裁优化文件 (*.json)',
+            accept: isEng
+              ? { 'application/json': ['.wce'], 'application/octet-stream': ['.wce'] }
+              : { 'application/json': ['.json'] }
+          }
+        ],
+        excludeAcceptAllOption: false
       };
       handle = await (window as any).showSaveFilePicker(pickerOptions);
     } catch (e: any) {
-      if (e?.name === 'AbortError') {
-        reportClientLog('info', 'PickAndSave', '用户取消了保存窗口');
+      const errName = e?.name || '';
+      const errMsg = e?.message || '';
+      reportClientLog('warn', 'PickAndSave', `showSaveFilePicker 结果: ${errName} - ${errMsg}`);
+
+      if (errName === 'AbortError') {
+        // 关键体验守护：部分 Windows/Chromium 覆盖同名文件或系统失焦时会自动抛出 AbortError。
+        // 若用户点击了保存却被浏览器异常中止，提供一键直接下载操作，彻底杜绝“没反应”！
+        toast.info("保存窗口已关闭", {
+          description: "若您刚才已点击确认保存但未生成文件，可直接点击右侧按钮下载副本：",
+          action: {
+            label: "立即下载副本",
+            onClick: () => {
+              void executeExport(suggestedName, isSaveAs, true);
+            }
+          },
+          duration: 9000
+        });
         return 'cancelled';
       }
-      reportClientLog('error', 'PickAndSave', `showSaveFilePicker 异常: ${e?.message}`, null, e?.stack);
+
       console.warn("showSaveFilePicker 异常，降级直接下载:", e);
-      alert(`【调起保存窗口异常】\n类型: ${e?.name}\n原因: ${e?.message}\n系统将为您降级直接下载副本`);
-      toast.error(`调起保存窗口受限（${e?.message || '请检查权限'}），已为您直接下载副本`);
+      toast.warning(`调起原生保存受限（${errMsg || errName}），为您直接下载副本`);
       await executeExport(suggestedName, isSaveAs, true);
       return 'downloaded';
     }
@@ -1174,18 +1271,25 @@ export default function App() {
         setConfirmExportOpen(false);
         toast.success(`保存成功，已绑定本地文件：${handle.name}`);
         reportClientLog('info', 'PickAndSave', `保存并绑定成功: ${handle.name}`);
+        // 立即刷新历史记录列表，确保弹窗中同步显示为绿色“本地文件”
+        await loadHistoryList();
         return 'saved';
       }
 
       reportClientLog('warn', 'PickAndSave', `句柄写入未成功: ${res.message}，改用普通下载`);
-      alert(`【本地文件写入受限诊断】\n原因: ${res.message || '未知异常'}\n\n系统将自动为您下载一份更新副本`);
-      toast.warning(`本地文件写入受限，已改为下载更新副本：${suggestedName}`);
+      alert(`【本地文件写入受限诊断】
+原因: ${res.message || '未知异常'}
+
+系统已自动为您下载一份更新副本`);
+      toast.warning(`本地文件写入受限，已为您下载副本：${suggestedName}`);
       await executeExport(suggestedName, isSaveAs, true);
       return 'downloaded';
     } catch (unexpectedErr: any) {
       toast.dismiss(toastId);
-      reportClientLog('error', 'PickAndSave', `写入阶段意外未捕获异常: ${unexpectedErr?.message}`, null, unexpectedErr?.stack);
-      alert(`【系统异常诊断】\n错误类型: ${unexpectedErr?.name}\n错误原因: ${unexpectedErr?.message}`);
+      reportClientLog('error', 'PickAndSave', `写入阶段意外异常: ${unexpectedErr?.message}`, null, unexpectedErr?.stack);
+      alert(`【系统异常诊断】
+错误类型: ${unexpectedErr?.name}
+错误原因: ${unexpectedErr?.message}`);
       throw unexpectedErr;
     }
   };
@@ -1400,14 +1504,13 @@ export default function App() {
       updateOptimizationHandle(pendingHandle || null);
     }
 
-    // 历史缓存不是导入成功的前置条件；句柄缓存异常不能阻塞页面完成导入。
-    void withSaveTimeout(
-      saveToHistory(fileName, data, "", pendingHandle || null),
-      '保存导入历史记录',
-      3000
-    ).catch((e) => {
+    // 关键修复：导入时将文件句柄完整绑定到当前工程及历史记录，并立即刷新历史记录列表
+    try {
+      await saveToHistory(fileName, data, "", pendingHandle || null, targetMode);
+      await loadHistoryList();
+    } catch (e) {
       console.warn("saveToHistory after import failed:", e);
-    });
+    }
     return true;
   };
 
@@ -2026,9 +2129,25 @@ export default function App() {
                                 本地文件
                               </span>
                             ) : (
-                              <span className="text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
-                                仅缓存
-                              </span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+                                  仅缓存
+                                </span>
+                                {canUseNativeFilePicker && (
+                                  <span
+                                    role="button"
+                                    tabIndex={0}
+                                    className="text-[10px] text-orange-600 hover:text-orange-700 hover:underline cursor-pointer flex items-center gap-0.5"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void bindCachedItemToLocalFile(item);
+                                    }}
+                                    title="将该缓存升级绑定为本地物理文件"
+                                  >
+                                    [绑定文件]
+                                  </span>
+                                )}
+                              </div>
                             )}
                           </div>
                         </Button>
