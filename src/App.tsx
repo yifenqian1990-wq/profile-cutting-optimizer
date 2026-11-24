@@ -34,6 +34,7 @@ import {
   ClipboardPaste,
   AlertTriangle,
   ExternalLink,
+  Link2,
   History
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -862,6 +863,73 @@ export default function App() {
     }
   };
 
+  const handleBindExistingLocalFile = async () => {
+    if (!canUseNativeFilePicker) {
+      toast.info("当前环境不支持原生文件句柄，请在新标签页访问");
+      return;
+    }
+    const isEng = mainMode === 'engineering';
+    const ext = isEng ? '.wce' : '.json';
+    const currentName = isEng ? currentProjectName : currentOptimizationName;
+    const suggestedName = currentName ? ensureFileExtension(currentName, ext) : getDefaultFileName(false);
+
+    toast.info(`请在弹出的系统窗口中选择本地存放「${suggestedName}」的文件以完成句柄提交`, { duration: 4000 });
+
+    let handles: any[] | null = null;
+    try {
+      // 关键突破：使用 showOpenFilePicker 获取物理文件句柄，100% 稳定，彻底规避 Windows Chromium 覆盖同名文件时的 AbortError Bug！
+      handles = await (window as any).showOpenFilePicker({
+        multiple: false,
+        types: [
+          {
+            description: isEng ? '工程项目文件 (*.wce)' : '套裁优化文件 (*.json)',
+            accept: isEng
+              ? { 'application/json': ['.wce'], 'application/octet-stream': ['.wce'] }
+              : { 'application/json': ['.json'] }
+          }
+        ]
+      });
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return;
+      toast.error(`调起文件窗口异常：${e?.message || '请检查权限'}`);
+      return;
+    }
+
+    if (!handles || !handles[0]) return;
+    const handle = handles[0];
+
+    const toastId = toast.loading(`正在写入并绑定文件句柄：${handle.name}...`);
+    try {
+      const projectData = buildCurrentProjectData();
+      const jsonText = JSON.stringify(projectData, null, 2);
+      const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+      const writable = await handle.createWritable({ keepExistingData: false });
+      await writable.write(blob);
+      await writable.close();
+
+      const safeName = handle.name || suggestedName;
+      if (isEng) {
+        setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
+        updateProjectHandle(handle);
+        setSavedEngRev(engRev);
+      } else {
+        setCurrentOptimizationName(safeName.replace(/\.[^/.]+$/, ""));
+        updateOptimizationHandle(handle);
+        setSavedOptRev(optRev);
+      }
+
+      await saveToHistory(safeName, projectData, currentName, handle, isEng ? 'engineering' : 'optimization');
+      await loadHistoryList();
+      toast.dismiss(toastId);
+      toast.success(`文件句柄已成功提交并绑定！后续点击保存或 Ctrl+S 将直接原地更新：${handle.name}`);
+      reportClientLog('info', 'BindHandle', `成功绑定本地文件句柄: ${handle.name}`);
+    } catch (err: any) {
+      toast.dismiss(toastId);
+      toast.error(`写入文件失败：${err?.message || '文件可能被占用或权限不足'}`);
+      reportClientLog('error', 'BindHandle', `绑定文件写入失败: ${err?.message}`, null, err?.stack);
+    }
+  };
+
   const bindCachedItemToLocalFile = async (item: any) => {
     if (!canUseNativeFilePicker) {
       toast.info("当前环境不支持原生文件句柄，请在新标签页访问");
@@ -871,10 +939,12 @@ export default function App() {
     const ext = isEng ? '.wce' : '.json';
     const suggestedName = ensureFileExtension(item.name, ext);
 
-    let handle: any = null;
+    toast.info(`请在文件窗口中选择本地存放「${suggestedName}」的文件以完成句柄绑定`, { duration: 4000 });
+
+    let handles: any[] | null = null;
     try {
-      const pickerOptions: any = {
-        suggestedName,
+      handles = await (window as any).showOpenFilePicker({
+        multiple: false,
         types: [
           {
             description: isEng ? '工程项目文件 (*.wce)' : '套裁优化文件 (*.json)',
@@ -882,19 +952,18 @@ export default function App() {
               ? { 'application/json': ['.wce'], 'application/octet-stream': ['.wce'] }
               : { 'application/json': ['.json'] }
           }
-        ],
-        excludeAcceptAllOption: false
-      };
-      handle = await (window as any).showSaveFilePicker(pickerOptions);
+        ]
+      });
     } catch (e: any) {
       if (e?.name === 'AbortError') return;
-      toast.error(`调起文件保存受限：${e?.message}`);
+      console.warn("showOpenFilePicker 出现异常:", e);
       return;
     }
 
-    if (!handle) return;
+    if (!handles || !handles[0]) return;
+    const handle = handles[0];
 
-    const toastId = toast.loading(`正在将缓存写入本地文件：${handle.name}...`);
+    const toastId = toast.loading(`正在写入并绑定文件句柄：${handle.name}...`);
     try {
       const dataToWrite = item.data || buildCurrentProjectData();
       const jsonText = JSON.stringify(dataToWrite, null, 2);
@@ -905,12 +974,27 @@ export default function App() {
 
       // 升级历史记录
       await saveToHistory(handle.name, dataToWrite, item.name, handle, isEng ? 'engineering' : 'optimization');
+      
+      // 如果当前页面打开的正巧是这个项目，立即激活当前句柄引用！
+      const currentName = isEng ? currentProjectName : currentOptimizationName;
+      if (currentName && (currentName === item.name.replace(/\.[^/.]+$/, "") || currentName === handle.name.replace(/\.[^/.]+$/, ""))) {
+        if (isEng) {
+          updateProjectHandle(handle);
+          setCurrentProjectName(handle.name.replace(/\.[^/.]+$/, ""));
+          setSavedEngRev(engRev);
+        } else {
+          updateOptimizationHandle(handle);
+          setCurrentOptimizationName(handle.name.replace(/\.[^/.]+$/, ""));
+          setSavedOptRev(optRev);
+        }
+      }
+
       await loadHistoryList();
       toast.dismiss(toastId);
-      toast.success(`已成功升级并绑定本地文件：${handle.name}`);
+      toast.success(`文件句柄提交成功！历史记录已升级为本地文件：${handle.name}`);
     } catch (err: any) {
       toast.dismiss(toastId);
-      toast.error(`绑定写入失败：${err?.message || '未知错误'}`);
+      toast.error(`绑定写入失败：${err?.message || '文件可能被占用或权限不足'}`);
     }
   };
 
@@ -1240,14 +1324,14 @@ export default function App() {
         // 关键体验守护：部分 Windows/Chromium 覆盖同名文件或系统失焦时会自动抛出 AbortError。
         // 若用户点击了保存却被浏览器异常中止，提供一键直接下载操作，彻底杜绝“没反应”！
         toast.info("保存窗口已关闭", {
-          description: "若您刚才已点击确认保存但未生成文件，可直接点击右侧按钮下载副本：",
+          description: "若您刚才已在窗口中点击保存（覆盖同名文件），请点击右侧直接绑定句柄：",
           action: {
-            label: "立即下载副本",
+            label: "选择已有文件绑定",
             onClick: () => {
-              void executeExport(suggestedName, isSaveAs, true);
+              void handleBindExistingLocalFile();
             }
           },
-          duration: 9000
+          duration: 12000
         });
         return 'cancelled';
       }
@@ -2330,6 +2414,18 @@ export default function App() {
                 <Upload className="h-4 w-4" />
                 {mainMode === 'engineering' ? '导入工程' : '导入套裁'}
               </Button>
+              {((mainMode === 'engineering' && !currentProjectHandle) || (mainMode === 'optimization' && !currentOptimizationHandle)) && canUseNativeFilePicker && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5 text-xs text-orange-600 border-orange-300 bg-orange-50 hover:bg-orange-100 hover:text-orange-700"
+                  onClick={handleBindExistingLocalFile}
+                  title="选择本地已有文件（如已下载的同名副本），直接覆盖并提交本地物理句柄，永久开启原地自动保存"
+                >
+                  <Link2 className="h-3.5 w-3.5" />
+                  绑定本地文件
+                </Button>
+              )}
               <Button variant="ghost" size="sm" className="gap-2 text-black/60" onClick={handleExportProject}>
                 <Save className="h-4 w-4" />
                 {mainMode === 'engineering' ? '保存工程' : '保存套裁'}
