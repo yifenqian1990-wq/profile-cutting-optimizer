@@ -20,6 +20,21 @@ app.set('trust proxy', (ip) => isPrivateOrLocalIp(ip));
 const PORT = parseInt(process.env.API_PORT || '3001', 10);
 
 app.use(cors());
+
+// 客户端诊断日志上报接口
+app.post('/api/client-log', (req, res) => {
+  try {
+    const { level = 'info', type = 'App', message = '', detail = null, stack = null } = req.body || {};
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    const time = new Date().toLocaleTimeString('zh-CN');
+    console.log([][ClientLog][][] [] );
+    if (detail) console.log('  -> Detail:', JSON.stringify(detail));
+    if (stack) console.log('  -> Stack:', stack);
+  } catch (err) {
+    console.error('[ClientLog] 记录日志失败:', err);
+  }
+  res.json({ ok: true });
+});
 app.use(express.json({ limit: '50mb' }));
 
 // IP 白名单 + 试用额度访问控制：白名单 IP 无障碍，其他 IP 按试用策略（默认 7 天 / 100 次页面访问）

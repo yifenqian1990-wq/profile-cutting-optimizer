@@ -76,6 +76,18 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 
+// 客户端诊断日志上报辅助函数
+const reportClientLog = (level: 'info' | 'warn' | 'error', type: string, message: string, detail?: any, stack?: string) => {
+  try {
+    const payload = { level, type, message, detail, stack };
+    fetch('/api/client-log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).catch(() => {});
+  } catch (_) {}
+};
+
 export default function App() {
   const [isAuthorized, setIsAuthorized] = useState<boolean>(true);
   const handleActivated = useCallback(() => {
@@ -286,6 +298,23 @@ export default function App() {
   // Lifted AI state to prevent re-analysis on tab switch
   const [aiMessages, setAiMessages] = useState<ChatMessage[]>([]);
   const [aiLatestSuggestion, setAiLatestSuggestion] = useState<AISuggestion | null>(null);
+
+  // 全局前端错误捕获与自动上报
+  useEffect(() => {
+    const handleGlobalError = (event: ErrorEvent) => {
+      reportClientLog('error', 'GlobalError', event.message, { filename: event.filename, lineno: event.lineno, colno: event.colno }, event.error?.stack);
+    };
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      reportClientLog('error', 'UnhandledRejection', typeof reason === 'string' ? reason : reason?.message || 'Promise Rejected', reason, reason?.stack);
+    };
+    window.addEventListener('error', handleGlobalError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    return () => {
+      window.removeEventListener('error', handleGlobalError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+    };
+  }, []);
 
   // Lightweight revision tracking instead of expensive JSON.stringify
   const [engRev, setEngRev] = useState(0);
@@ -1007,45 +1036,55 @@ export default function App() {
     options?: { skipPermissionCheck?: boolean; silentToast?: boolean }
   ): Promise<{ ok: boolean; reason?: 'permission_denied' | 'not_found' | 'error'; message?: string }> => {
     let writable: any = null;
+    reportClientLog('info', 'SilentSave', `开始写入本地文件句柄: ${handle?.name || '未知文件'}`);
     try {
       if (!options?.skipPermissionCheck && typeof handle.queryPermission === 'function') {
-        let perm = await withSaveTimeout(handle.queryPermission({ mode: 'readwrite' }), '检查文件权限');
+        let perm = await withSaveTimeout(handle.queryPermission({ mode: 'readwrite' }), '检查文件权限', 5000);
         if (perm !== 'granted' && typeof handle.requestPermission === 'function') {
-          perm = await withSaveTimeout(handle.requestPermission({ mode: 'readwrite' }), '申请文件权限');
+          perm = await withSaveTimeout(handle.requestPermission({ mode: 'readwrite' }), '申请文件权限', 8000);
         }
         if (perm !== 'granted') {
+          reportClientLog('warn', 'SilentSave', `未获得本地文件写入权限: ${handle?.name}`);
+          alert(`【保存受限】未获得本地文件写入权限（${handle?.name || '未知文件'}）`);
           return { ok: false, reason: 'permission_denied', message: '未授予本地文件写入权限' };
         }
       }
 
       const projectData = buildCurrentProjectData();
       const jsonText = JSON.stringify(projectData, null, 2);
+      const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+      reportClientLog('info', 'SilentSave', `数据序列化完成，准备写入流，体积: ${blob.size} 字节`);
 
       try {
-        writable = await withSaveTimeout(handle.createWritable(), '打开文件写入流');
+        writable = await withSaveTimeout(handle.createWritable({ keepExistingData: false }), '打开文件写入流', 8000);
       } catch (cwErr: any) {
-        console.error("createWritable 失败:", cwErr);
+        reportClientLog('error', 'SilentSave', `createWritable 失败: ${cwErr?.message}`, null, cwErr?.stack);
+        alert(`【保存失败诊断】打开文件流失败：\n类型: ${cwErr?.name}\n原因: ${cwErr?.message}\n请检查目标文件是否被其他软件占用或保存位置权限受限！`);
         throw cwErr;
       }
 
       try {
-        await withSaveTimeout(writable.write(jsonText), '写入文件');
+        await withSaveTimeout(writable.write(blob), '写入文件', 15000);
       } catch (wErr: any) {
-        console.error("writable.write 失败:", wErr);
+        reportClientLog('error', 'SilentSave', `writable.write 失败: ${wErr?.message}`, null, wErr?.stack);
+        alert(`【保存失败诊断】写入文件数据失败：\n类型: ${wErr?.name}\n原因: ${wErr?.message}`);
         throw wErr;
       }
 
       try {
-        await withSaveTimeout(writable.close(), '提交文件保存');
+        await withSaveTimeout(writable.close(), '提交文件保存', 15000);
         writable = null;
       } catch (clErr: any) {
-        console.error("writable.close 失败:", clErr);
+        reportClientLog('error', 'SilentSave', `writable.close 失败: ${clErr?.message}`, null, clErr?.stack);
+        alert(`【保存失败诊断】提交保存失败：\n类型: ${clErr?.name}\n原因: ${clErr?.message}`);
         throw clErr;
       }
 
+      reportClientLog('info', 'SilentSave', `物理文件写入磁盘成功: ${handle?.name}`);
+
+      // 本地物理文件已保存成功！立即更新当前工程状态与版本号
       const safeName = handle.name || getDefaultFileName(false);
       const oldName = mainMode === 'engineering' ? currentProjectName : currentOptimizationName;
-      await withSaveTimeout(saveToHistory(safeName, projectData, oldName, handle), '保存本地历史记录');
 
       if (mainMode === 'engineering') {
         setCurrentProjectName(safeName.replace(/\.[^/.]+$/, ""));
@@ -1057,6 +1096,13 @@ export default function App() {
         setSavedOptRev(optRev);
       }
 
+      // 异步存储到历史记录，绝不阻塞本地文件已保存的成功反馈
+      void saveToHistory(safeName, projectData, oldName, handle).then(() => {
+        reportClientLog('info', 'SilentSave', `历史记录更新成功: ${safeName}`);
+      }).catch((histErr) => {
+        reportClientLog('warn', 'SilentSave', `历史记录更新失败（不影响本地文件已保存）: ${histErr?.message}`);
+      });
+
       return { ok: true };
     } catch (err: any) {
       if (writable) {
@@ -1064,6 +1110,7 @@ export default function App() {
           await writable.abort();
         } catch (_) {}
       }
+      reportClientLog('error', 'SilentSave', `写入本地文件异常终止: ${err?.message}`, null, err?.stack);
       console.error("Silent save to handle failed:", err);
       if (err?.name === 'NotAllowedError' || err?.name === 'SecurityError') {
         return { ok: false, reason: 'permission_denied', message: err?.message || '文件写入权限被拒绝' };
@@ -1085,26 +1132,30 @@ export default function App() {
       ? ensureFileExtension(customSuggestedName, ext)
       : getDefaultFileName(isSaveAs);
 
+    reportClientLog('info', 'PickAndSave', `调起原生保存窗口, 建议文件名: ${suggestedName}`);
+
     if (!canUseNativeFilePicker) {
+      reportClientLog('warn', 'PickAndSave', '环境不支持原生文件句柄，降级直接下载');
       alert(`【环境诊断提示】当前浏览器环境未开放本地文件物理句柄权限！\n\n原因诊断：\n- 访问协议: ${window.location.protocol} (要求必须为 https:// 或 localhost)\n- 安全上下文: ${window.isSecureContext ? '正常' : '异常(非安全上下文，Chrome强制禁用写句柄)'}\n- 原生API支持: ${typeof (window as any).showSaveFilePicker}\n- 是否处于iframe: ${isInIframe ? '是(受限)' : '否'}\n\n系统已为您直接下载文件副本。请确保通过 https://tc.yifen.us.ci 独立标签页访问！`);
       await executeExport(suggestedName, isSaveAs, true);
       return 'downloaded';
     }
 
-    const currentHandle = isEng ? projectHandleRef.current : optimizationHandleRef.current;
     let handle: any = null;
 
     try {
       const pickerOptions: any = {
         suggestedName
       };
-      // Android Chrome 对 FileSystemFileHandle 作为 startIn 的兼容性不一致，
-      // 尤其是优化项目的 JSON 另存为可能直接拒绝打开保存窗口。另存为不依赖旧句柄，
-      // 让系统选择器使用默认目录；普通保存仍直接写入已有句柄。
       handle = await (window as any).showSaveFilePicker(pickerOptions);
     } catch (e: any) {
-      if (e?.name === 'AbortError') return 'cancelled';
+      if (e?.name === 'AbortError') {
+        reportClientLog('info', 'PickAndSave', '用户取消了保存窗口');
+        return 'cancelled';
+      }
+      reportClientLog('error', 'PickAndSave', `showSaveFilePicker 异常: ${e?.message}`, null, e?.stack);
       console.warn("showSaveFilePicker 异常，降级直接下载:", e);
+      alert(`【调起保存窗口异常】\n类型: ${e?.name}\n原因: ${e?.message}\n系统将为您降级直接下载副本`);
       toast.error(`调起保存窗口受限（${e?.message || '请检查权限'}），已为您直接下载副本`);
       await executeExport(suggestedName, isSaveAs, true);
       return 'downloaded';
@@ -1112,20 +1163,31 @@ export default function App() {
 
     if (!handle) return 'cancelled';
 
-    // 关键修复：通过 showSaveFilePicker 获得的句柄已获用户保存授权，跳过二次权限检查避免手势失效抛错
-    const res = await silentSaveWithHandle(handle, { skipPermissionCheck: true, silentToast: true });
-    if (res.ok) {
-      setConfirmExportOpen(false);
-      toast.success("保存成功");
-      return 'saved';
-    }
+    reportClientLog('info', 'PickAndSave', `用户已确认文件保存位置: ${handle.name}，开始写入...`);
+    const toastId = toast.loading(`正在写入本地文件：${handle.name}...`);
 
-    console.warn("句柄写入受限，改用普通下载:", res.message);
-    toast.warning(`本地文件写入受限，已改为下载更新副本：${suggestedName}`, {
-      description: '请在下载目录找到新文件；原文件不会被浏览器自动覆盖。'
-    });
-    await executeExport(suggestedName, isSaveAs, true);
-    return 'downloaded';
+    try {
+      const res = await silentSaveWithHandle(handle, { skipPermissionCheck: true, silentToast: true });
+      toast.dismiss(toastId);
+
+      if (res.ok) {
+        setConfirmExportOpen(false);
+        toast.success(`保存成功，已绑定本地文件：${handle.name}`);
+        reportClientLog('info', 'PickAndSave', `保存并绑定成功: ${handle.name}`);
+        return 'saved';
+      }
+
+      reportClientLog('warn', 'PickAndSave', `句柄写入未成功: ${res.message}，改用普通下载`);
+      alert(`【本地文件写入受限诊断】\n原因: ${res.message || '未知异常'}\n\n系统将自动为您下载一份更新副本`);
+      toast.warning(`本地文件写入受限，已改为下载更新副本：${suggestedName}`);
+      await executeExport(suggestedName, isSaveAs, true);
+      return 'downloaded';
+    } catch (unexpectedErr: any) {
+      toast.dismiss(toastId);
+      reportClientLog('error', 'PickAndSave', `写入阶段意外未捕获异常: ${unexpectedErr?.message}`, null, unexpectedErr?.stack);
+      alert(`【系统异常诊断】\n错误类型: ${unexpectedErr?.name}\n错误原因: ${unexpectedErr?.message}`);
+      throw unexpectedErr;
+    }
   };
 
   const handleExportProject = async () => {
